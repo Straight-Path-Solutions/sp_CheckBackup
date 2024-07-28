@@ -7,7 +7,7 @@ Here at Straight Path Solutions, we're big fans of community tools like [sp_WhoI
 
 # What does sp_CheckBackup do?
 
-This tool will allow you to review your SQL Server backup history quickly and easily, and to also identify potential issues with your backups like missing backups, failed backups, and split backup chains.
+This tool will allow you to review your SQL Server backup history quickly and easily, and also to identify potential issues with your backups like missing backups, failed backups, and split backup chains.
 This tool has several modes that present a different set of data, depending on what you want to examine.<p>
 
 **Mode 0: A check for problems like…** <br>

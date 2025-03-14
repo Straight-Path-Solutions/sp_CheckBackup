@@ -756,7 +756,10 @@ IF @Mode IN (0,99) BEGIN
 		, 'Backups without checksum'
 		, 'The database ' + bmc.DatabaseName + ' has had ' + CAST(bmc.NumberOfBackups AS VARCHAR(9)) + ' recent backups without a checksum.'
 		, 'We recommend verifying all backups with checksum to reduce the likelihood of any corrupted backup files.'
-		, 'https://straightpathsql.com/cb/backup-compression'
+		/*
+                   , 'https://straightpathsql.com/cb/backup-compression'
+                */
+		, 'https://straightpathsql.com/cb/backup-checksum'
     FROM BackupMissingChecksum bmc
 
 

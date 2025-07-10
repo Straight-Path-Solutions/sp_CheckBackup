@@ -53,11 +53,9 @@ This tool has several modes that present a different set of data, depending on w
 <br>
 **Mode 4: A check for all results from Mode 1-3, returning 3 result sets** <br>
 <br>
-Using each of these Modes, you should be able to quickly identify recoverability issues with your backups and focus on facts about them to help you resolve any issue. <br>
-<br>
 **Mode 5: A check for restores** <br>
-<br>
-Provide information on recent database restores that have occurred on this instance. <br>
+<br><br>
+Using each of these Modes, you should be able to quickly identify recoverability issues with your backups and focus on facts about them to help you resolve any issue. <br>
 <br>
 # How do I use it?
 Execute the script to create sp_CheckBackup in the database of your choice, although we would recommend the master so you can call it from the context of any database.

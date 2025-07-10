@@ -54,6 +54,10 @@ This tool has several modes that present a different set of data, depending on w
 **Mode 4: A check for all results from Mode 1-3, returning 3 result sets** <br>
 <br>
 Using each of these Modes, you should be able to quickly identify recoverability issues with your backups and focus on facts about them to help you resolve any issue.
+<br>
+**Mode 5: A check for restores** <br>
+<br>
+Provide information on recent database restores that have occurred on this instance.
 
 # How do I use it?
 Execute the script to create sp_CheckBackup in the database of your choice, although we would recommend the master so you can call it from the context of any database.
@@ -68,15 +72,19 @@ Although you can simply execute it as is, there are several parameters you cna u
 
 **@Mode** – see the previous few paragraphs to decide which Mode you want to use.<p>
 
-**@ShowCopyOnly** - the default is 0, which excludes showing copy only backups from the results. If you only want to include copy only backups to show all backups performed, set this to 1.<p>
+**@ShowCopyOnly** - the default is 1, which includes copy only backups from the results. If you want to exclude copy only backups from the results, set this to 0.<p>
 
 **@DatabaseName** - the default results include information for all databases, but use this parameter if you have a specific database that you are reviewing. Using this parameter can greatly reduce the results.<p>
 
 **@BackupType** - the default results include information for all three kinds of backups, but use this parameter if you have a specific type of backup that you are reviewing. Use “F” for full backups, “D” for differential backups, and “T” for transaction log backups. Using this parameter can also greatly reduce the results.<p>
 
-**@StartDate** - the default is to return results from backups completed in the last 30 days, but use this to filter results from a different time period.<p>
+**@StartDate** - the default is to return results from backups completed in the last 7 days, but use this to filter results from a different time period.<p>
 
-**@EndDate** - the default is to return results from the last 30 days, but use this as well to filter results from a different time period.<p>
+**@EndDate** - the default is to return results from the last 7 days, but use this as well to filter results from a different time period.<p>
+
+**@RPO** - the default is NULL, but you can use this to check to see if your backups are within your Recovery Point Objective (RPO). If not, they will show up in the Mode 0 issues results.<p>
+
+**@Override** - by default the stored procedure will quit and notify you if you run it on a database with 50 or more databases. Use this parameter to override that and run the full check.<p>
 
 # What do the Importance levels in Mode 0 mean?
 

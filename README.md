@@ -58,7 +58,7 @@ Using each of these Modes, you should be able to quickly identify recoverability
 **Mode 5: A check for restores** <br>
 <br>
 Provide information on recent database restores that have occurred on this instance.
-
+<br>
 # How do I use it?
 Execute the script to create sp_CheckBackup in the database of your choice, although we would recommend the master so you can call it from the context of any database.
 <p>

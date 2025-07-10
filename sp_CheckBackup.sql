@@ -5,11 +5,13 @@ GO
 
 ALTER PROCEDURE dbo.sp_CheckBackup
     @Mode TINYINT = 99 
-    , @ShowCopyOnly BIT = 0
+    , @ShowCopyOnly BIT = 1
     , @DatabaseName NVARCHAR(128) = NULL
 	, @BackupType CHAR(1) = NULL
 	, @StartDate DATETIME = NULL
 	, @EndDate DATETIME = NULL
+	, @RPO INT = NULL
+	, @Override BIT = 0
 	, @Help BIT = 0
 
 WITH RECOMPILE
@@ -21,8 +23,8 @@ DECLARE
 	, @VersionDate DATETIME = NULL
 
 SELECT
-    @Version = '1.0'
-    , @VersionDate = '20240727';
+    @Version = '2.0'
+    , @VersionDate = '20250509';
 
 /* @Help = 1 */
 IF @Help = 1 BEGIN
@@ -50,6 +52,7 @@ IF @Help = 1 BEGIN
 		   2=Detail, all backup history, may be filtered
 		   3=Backup chain check, may be filtered, look for any number > 1
 		   4=Shows results of 1, 2, and 3, and may be filtered
+		   5=Shows restore history, and may be filtered
 
     @ShowCopyOnly 0=Hide Copy Only backups(DEFAULT), 1=Show Copy Only backups
 
@@ -60,6 +63,10 @@ IF @Help = 1 BEGIN
 	@StartDate for filtering
 
 	@EndDate for filtering
+	
+	@RPO for confirming backups within an expected Recovery Point Objective (minutes)
+		
+	@Override for allowing checks on instances of over 50 databases
 
     MIT License
     
@@ -69,7 +76,7 @@ IF @Help = 1 BEGIN
     	
     All other copyrights for sp_CheckBackup are held by Straight Path Solutions.
     
-    Copyright 2024 Straight Path IT Solutions, LLC
+    Copyright 2025 Straight Path IT Solutions, LLC
     
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -93,11 +100,25 @@ IF @Help = 1 BEGIN
 	RETURN;
 	END;  
 
+
+/* Check if @Override needed for too many databases */
+IF @Override = 0 AND ((SELECT COUNT(database_id) from sys.databases) > 50) BEGIN
+	PRINT '
+	You have over 50 databases, so you could have a lot of backup history.
+
+	If you want to proceed, and you understand this procedure could use
+	substantial resources to get your backup history, use @Override = 1.
+
+	Godspeed, my friend.
+'
+	RETURN;
+	END;  
+
 /* set some defaults */
 
 /* Default @StartDate of 7 days before now */
 IF @StartDate IS NULL
-    SET @StartDate = DATEADD(dd, -30, GETDATE());
+    SET @StartDate = DATEADD(dd, -7, GETDATE());
 
 IF @EndDate IS NULL
 	SET @EndDate = GETDATE();
@@ -141,18 +162,43 @@ SELECT @SQLVersion = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128));
 
 SELECT 
 	@SQLVersionMajor = SUBSTRING(@SQLVersion, 1,CHARINDEX('.', @SQLVersion) + 1 )
-	, @SQLVersionMinor = PARSENAME(CONVERT(varchar(32), @SQLVersion), 2);
+	, @SQLVersionMinor = PARSENAME(CONVERT(VARCHAR(32), @SQLVersion), 2);
 
 
 /* grab the backup history */
+IF OBJECT_ID('tempdb..#LastBackup') IS NOT NULL
+	DROP TABLE #LastBackup;
+
+CREATE TABLE #LastBackup (
+	DatabaseName NVARCHAR(128)
+	, InstanceName NVARCHAR(128)
+    , BackupType CHAR(1)
+	, LastBackupDate DATETIME
+	);
+
+INSERT #LastBackup
+SELECT
+	[database_name]
+	, server_name
+	, [type]
+	, max(backup_start_date)
+FROM msdb.dbo.backupset
+WHERE backup_finish_date is not null
+	AND database_name = COALESCE(@DatabaseName, database_name)
+GROUP BY [database_name], server_name, [type];
+
+CREATE CLUSTERED INDEX PK_LastBackup
+ON #LastBackup (DatabaseName, InstanceName, BackupType);
+
+
 IF OBJECT_ID('tempdb..#BackupHistory') IS NOT NULL
 	DROP TABLE #BackupHistory;
 
 CREATE TABLE #BackupHistory (
 	BackupSetID INT
-	, InstanceName NVARCHAR(255)
+	, InstanceName NVARCHAR(128)
 	, DatabaseID INT
-	, DatabaseName NVARCHAR(255)
+	, DatabaseName NVARCHAR(128)
 	, RecoveryModel CHAR(1)
     , BackupType CHAR(1)
 	, IsCopyOnly BIT
@@ -265,7 +311,7 @@ CREATE TABLE #AvailabilityGroup (
 	);
 
 
-/* Get Availability Group info for SQL Server 2016 and later */
+/* Get Availability Group info for SQL Server 2012 and later */
 IF SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */ BEGIN
 	IF @SQLVersionMajor >= 11 BEGIN
 	    SET @SQL = '
@@ -287,12 +333,27 @@ IF SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */ BEGIN
         	AND d.state NOT IN (1, 6, 10) 
         	AND d.is_in_standby = 0 
         	AND d.source_database_id IS NULL;'
+		END
 
---SELECT @SQL
+	/* For instances that exist prior to availability groups */
+	IF @SQLVersionMajor < 11 BEGIN
+	    SET @SQL = '
+        SELECT
+            d.database_id
+            , d.[name]
+            , NULL
+            , NULL
+        	, NULL
+        FROM sys.databases d
+        WHERE d.database_id <> 2 
+        	AND d.state NOT IN (1, 6, 10) 
+        	AND d.is_in_standby = 0 
+        	AND d.source_database_id IS NULL;'
+		END
 
         INSERT #AvailabilityGroup
         EXEC sp_executesql @SQL
-        END;
+        
     END;
 
 
@@ -365,7 +426,10 @@ IF @Mode IN (1,4,99) BEGIN
 				DatabaseName
 				, MAX(BackupSetID) AS BackupSetID
 			FROM #BackupHistory
-			WHERE IsCopyOnly = 0
+			WHERE IsCopyOnly = CASE
+				WHEN @ShowCopyOnly = 1 THEN IsCopyOnly
+				ELSE 0
+				END
 				AND FamilySequenceNumber = 1
 				AND BackupType = 'D'
 			GROUP BY
@@ -408,7 +472,10 @@ IF @Mode IN (1,4,99) BEGIN
 				DatabaseName
 				, MAX(BackupSetID) AS BackupSetID
 			FROM #BackupHistory
-			WHERE IsCopyOnly = 0
+			WHERE IsCopyOnly = CASE
+				WHEN @ShowCopyOnly = 1 THEN IsCopyOnly
+				ELSE 0
+				END
 				AND FamilySequenceNumber = 1
 				AND BackupType = 'I'
 			GROUP BY
@@ -451,7 +518,10 @@ IF @Mode IN (1,4,99) BEGIN
 				DatabaseName
 				, MAX(BackupSetID) AS BackupSetID
 			FROM #BackupHistory
-			WHERE IsCopyOnly = 0
+			WHERE IsCopyOnly = CASE
+				WHEN @ShowCopyOnly = 1 THEN IsCopyOnly
+				ELSE 0
+				END
 				AND FamilySequenceNumber = 1
 				AND BackupType = 'L'
 			GROUP BY
@@ -688,28 +758,83 @@ SELECT
 
 	END;
 
+/* @Mode = 5 Restore history */
+IF @Mode IN (5) BEGIN
+	;WITH LastRestore AS (
+		SELECT
+			[d].[name] AS DatabaseName
+			, r.restore_date AS RestoreDate
+			, r.user_name AS UserName
+			, ROW_NUMBER() OVER (PARTITION BY d.Name ORDER BY r.[restore_date] DESC) AS RowNumber
+	FROM master.sys.databases d
+	LEFT OUTER JOIN msdb.dbo.[restorehistory] r ON r.[destination_database_name] = d.Name
+	)
+	SELECT
+		DatabaseName
+		, RestoreDate
+		, UserName
+	FROM LastRestore
+	WHERE RowNumber = 1
+	AND DatabaseName = COALESCE(@DatabaseName, DatabaseName);
+
+	SELECT
+		d.[name] AS DatabaseName
+		, rh.restore_date AS RestoreDate
+		, rh.[user_name] AS UserName
+		, CASE rh.restore_type
+			WHEN 'D' THEN 'Database'
+			WHEN 'F' THEN 'File'
+			WHEN 'G' THEN 'Filegroup'
+			WHEN 'I' THEN 'Differential'
+			WHEN 'L' THEN 'Log'
+			WHEN 'V' THEN 'Verify Only'
+			ELSE 'Unknown' END AS RestoreType
+		, CASE rh.[replace]
+			WHEN 1 THEN 'Yes'
+			WHEN 2 THEN 'No'
+			ELSE 'Unknown' END AS [Replace]
+		, CASE rh.[recovery]
+			WHEN 1 THEN 'Recovery'
+			WHEN 2 THEN 'No Recovery'
+			ELSE 'Unknown' END AS [Recovery]
+		, rh.stop_at AS StopAtTime
+	FROM master.sys.databases d
+	INNER JOIN msdb.dbo.[restorehistory] rh
+		ON rh.[destination_database_name] = d.[name]
+	WHERE d.[name] = COALESCE(@DatabaseName, d.[name])
+		AND rh.restore_date >= COALESCE(@StartDate, rh.restore_date)
+		AND rh.restore_date <= COALESCE(@EndDate, rh.restore_date)
+	ORDER BY RestoreDate DESC;
+
+	END;
 
 /* @Mode = 0 Backup issues */
 IF @Mode IN (0,99) BEGIN
 
-	IF OBJECT_ID('tempdb..#Checks') IS NOT NULL
-		DROP TABLE #Checks;
+	IF OBJECT_ID('tempdb..#Results') IS NOT NULL
+		DROP TABLE #Results;
 
-	CREATE TABLE #Checks (
-		Importance TINYINT
-		, DatabaseName VARCHAR(255)
-		, Issue VARCHAR(255)
-		, Details VARCHAR(1000)
-		, ActionStep VARCHAR(1000)
+	CREATE TABLE #Results (
+		CategoryID TINYINT
+		, CheckID INT
+		, Importance TINYINT
+		, CheckName VARCHAR(50)
+		, Issue NVARCHAR(1000)
+		, DatabaseName NVARCHAR(255)
+		, Details NVARCHAR(1000)
+		, ActionStep NVARCHAR(1000)
 		, ReadMoreURL XML
 		);
 
 	/* Backup Compression not enabled */
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT 
-		3
-		, NULL
+		2
+		, 208
+		, 2
+		, 'Backup compression'
 		, 'Configuration ' + [name] + ' not enabled'
+		, NULL
 		, 'Backup compression allows for smaller and faster backup files.'
 		, 'Unless there is blob, image, or XML data in your database, we recommend enabling ' + [name] + ' to get the benefits of compression.'
 		, 'https://straightpathsql.com/cb/backup-compression'
@@ -721,11 +846,14 @@ IF @Mode IN (0,99) BEGIN
 		AND value_in_use = 0;
 
 	/* Backup Checksum not enabled */
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT 
 		2
-		, NULL
+		, 209
+		, 2
+		, 'Backup checksum'
 		, 'Configuration ' + [name] + ' not enabled'
+		, NULL
 		, 'Backup checksum helps validate the consistency of backup files.'
 		, 'We recommend enabling ' + [name] + ' to complete checksum verification by default and reduce the likelihood of any corrupted backup files.'
 		, 'https://straightpathsql.com/cb/backup-checksum'
@@ -749,111 +877,129 @@ IF @Mode IN (0,99) BEGIN
 		GROUP BY bh.DatabaseName
 		)
 
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT
 		2
-		, DatabaseName
+		, 202
+		, 2
 		, 'Backups without checksum'
+		, 'Recent backups created without using checksum'
+		, DatabaseName
 		, 'The database ' + bmc.DatabaseName + ' has had ' + CAST(bmc.NumberOfBackups AS VARCHAR(9)) + ' recent backups without a checksum.'
 		, 'We recommend verifying all backups with checksum to reduce the likelihood of any corrupted backup files.'
-		, 'https://straightpathsql.com/cb/backup-compression'
+		, 'https://straightpathsql.com/cb/backup-checksum'
     FROM BackupMissingChecksum bmc
+	WHERE DatabaseName = COALESCE(@DatabaseName, DatabaseName);
 
 
     /* Missing Full backups */
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT
-		1
+		2
+		, 203
+		, 1
+		, 'Missing full backup'
+		, 'Database missing full backups'
 		, d.[name]
-		, 'Missing Full backup'
 		, 'That database ' + d.[name] + ' has not had any full backups.'
 		, 'If the data in this database is important, you need to make a full backup to recover the data.'
 		, 'https://straightpathsql.com/cb/missing-backups'
 	FROM master.sys.databases d
     INNER JOIN #AvailabilityGroup ag
 	    ON d.database_id = ag.DatabaseID
-	LEFT JOIN #BackupHistory bh 
-		ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = bh.DatabaseName COLLATE SQL_Latin1_General_CP1_CI_AS
-		AND bh.BackupType = 'D'
-		AND bh.InstanceName = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
+	LEFT JOIN #LastBackup lb 
+		ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = lb.DatabaseName COLLATE SQL_Latin1_General_CP1_CI_AS
+		AND lb.BackupType = 'D'
+		AND lb.InstanceName = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
 	WHERE d.database_id <> 2  /* exclude tempdb */
+	    AND d.[name] = COALESCE(@DatabaseName, d.[name])
 		AND d.state NOT IN (1, 6, 10) /* not currently offline or restoring, like log shipping databases */
 		AND d.is_in_standby = 0 /* Not a log shipping target database */
 		AND d.source_database_id IS NULL /* Excludes database snapshots */
-		AND bh.BackupStartDate IS NULL
+		AND lb.LastBackupDate IS NULL
         AND COALESCE(ag.IsPreferredBackupReplica, 1) = 1;
 
     /* Missing log backups */
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT
-		1
+		2
+		, 204
+		, 1
+		, 'Missing log backup'
+		, 'Database missing log backups'
 		, d.[name]
-		, 'Missing Log backup'
 		, 'That database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups.'
 		, 'If point in time recovery is important to you, you need to take regular log backups.'
 		, 'https://straightpathsql.com/cb/missing-backups'
 	FROM master.sys.databases d
     INNER JOIN #AvailabilityGroup ag
 	    ON d.database_id = ag.DatabaseID
-	LEFT JOIN #BackupHistory bh 
-		ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = bh.DatabaseName COLLATE SQL_Latin1_General_CP1_CI_AS
-		AND bh.BackupType = 'L'
-		AND bh.InstanceName = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
+	LEFT JOIN #LastBackup lb 
+		ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = lb.DatabaseName COLLATE SQL_Latin1_General_CP1_CI_AS
+		AND lb.BackupType = 'L'
+		AND lb.InstanceName = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
 	WHERE d.database_id <> 2  /* exclude tempdb */
+	    AND d.[name] = COALESCE(@DatabaseName, d.[name])
 		AND d.state NOT IN (1, 6, 10) /* not currently offline or restoring, like log shipping databases */
 		AND d.is_in_standby = 0 /* Not a log shipping target database */
 		AND d.source_database_id IS NULL /* Excludes database snapshots */
-		AND bh.BackupStartDate IS NULL
+		AND lb.LastBackupDate IS NULL
 		AND d.recovery_model_desc <> 'SIMPLE'
         AND COALESCE(ag.IsPreferredBackupReplica, 1) = 1;
 
     /* No recent Full backups */
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT
-		1
+		2
+		, 205
+		, 1
+		, 'No recent full backup'
+		, 'No full backup in the last 7 days'
         , d.[name]
-		, 'No recent Full backup'
 		, 'That database ' + d.[name] + ' has not had any full backups in over a week.'
 		, 'If the data in this database is important, you need to make regular full backups to recover the data.'
 		, 'https://straightpathsql.com/cb/recovery-point-objective'
 	FROM master.sys.databases d
-	INNER JOIN #BackupHistory bh 
-		ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = bh.DatabaseName COLLATE SQL_Latin1_General_CP1_CI_AS
-		AND bh.BackupType = 'D'
-		AND bh.InstanceName = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
+	INNER JOIN #LastBackup lb
+		ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = lb.DatabaseName COLLATE SQL_Latin1_General_CP1_CI_AS
+		AND lb.BackupType = 'D'
+		AND lb.InstanceName = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
     INNER JOIN #AvailabilityGroup ag
 	    ON d.database_id = ag.DatabaseID
 	WHERE d.database_id <> 2  /* exclude tempdb */
+	    AND d.[name] = COALESCE(@DatabaseName, d.[name])
 		AND d.state NOT IN (1, 6, 10) /* not currently offline or restoring, like log shipping databases */
 		AND d.is_in_standby = 0 /* Not a log shipping target database */
         AND COALESCE(ag.IsPreferredBackupReplica, 1) = 1
-	GROUP BY d.name
-	HAVING MAX(bh.BackupStartDate) <= DATEADD(dd, -7, GETDATE());
+		AND lb.LastBackupDate <= DATEADD(dd, -7, GETDATE());
 
     /* No recent log backups */
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT
-		1
-        , d.[name]
-		, 'No recent Log backup'
+		2
+		, 206
+		, 1
+		, 'No recent log backup'
+		, 'No log backup in the last day'
+		, d.[name]
 		, 'That database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups in the last hour.'
 		, 'If point in time recovery is important to you, you need to take regular log backups.'
 		, 'https://straightpathsql.com/cb/recovery-point-objective'
 	FROM master.sys.databases d
     INNER JOIN #AvailabilityGroup ag
 	    ON d.database_id = ag.DatabaseID
-	LEFT JOIN #BackupHistory bh 
-		ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = bh.DatabaseName COLLATE SQL_Latin1_General_CP1_CI_AS
-		AND bh.BackupType = 'L'
-		AND bh.InstanceName = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
+	INNER JOIN #LastBackup lb
+		ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = lb.DatabaseName COLLATE SQL_Latin1_General_CP1_CI_AS
+		AND lb.BackupType = 'L'
+		AND lb.InstanceName = SERVERPROPERTY('ServerName') /*Backupset ran on current server  */
 	WHERE d.database_id <> 2  /* exclude tempdb */
+	    AND lb.DatabaseName = COALESCE(@DatabaseName, lb.DatabaseName)
 		AND d.state NOT IN (1, 6, 10) /* not currently offline or restoring, like log shipping databases */
 		AND d.is_in_standby = 0 /* Not a log shipping target database */
 		AND d.source_database_id IS NULL /* Excludes database snapshots */
 		AND d.recovery_model_desc <> 'SIMPLE'
         AND COALESCE(ag.IsPreferredBackupReplica, 1) = 1
-	GROUP BY d.name
-	HAVING MAX(bh.BackupStartDate) <= DATEADD(hh, -1, GETDATE());
+		AND lb.LastBackupDate <= DATEADD(hh, -24, GETDATE());
 
     /* Split backup chain */
 	;WITH BackupPathCount AS (
@@ -865,6 +1011,7 @@ IF @Mode IN (0,99) BEGIN
 	FROM #BackupPath bp
 	INNER JOIN #BackupHistory bh
 		ON bp.BackupSetID = bh.BackupSetID
+	    AND bh.DatabaseName = COALESCE(@DatabaseName, bh.DatabaseName)
 	WHERE bh.IsCopyOnly = 0
 	    AND bh.BackupStartDate >= @StartDate
 		AND bh.BackupStartDate <= @EndDate
@@ -874,11 +1021,14 @@ IF @Mode IN (0,99) BEGIN
 		, bh.BackupType
     )
 
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT
 		2
-        , bpc.DatabaseName
+		, 201
+		, 1
 		, 'Split backup chain'
+		, 'Databases with backups in more than one location will be difficult to restore.'
+		, bpc.DatabaseName
 		, 'That database ' + bpc.DatabaseName + ' appears to have a split backup chain for ' 
 		    + CASE bpc.BackupType
 			    WHEN 'D' THEN 'Full'
@@ -893,11 +1043,14 @@ IF @Mode IN (0,99) BEGIN
 
 
 	/* check for TDE certificate backup */
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT
-		1
-		, db_name(d.database_id)
+		2
+		, 211
+		, 1
 		, 'TDE certificate never backed up'
+		, 'The trasparent data encryption (TDE) certificate required for restoring has never been backed up.'
+		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' has never been backed up'
 		, 'Make a backup of your current certificate and store it in a secure location in case you need to restore this encrypted database.'
 		, 'https://straightpathsql.com/cb/tde-certificate-no-backup'
@@ -906,11 +1059,14 @@ IF @Mode IN (0,99) BEGIN
 		ON c.thumbprint = d.encryptor_thumbprint
 	WHERE c.pvt_key_last_backup_date IS NULL;
 
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT
 		2
-		, db_name(d.database_id)
+		, 211
+		, 1
 		, 'TDE certificate not backed up recently'
+		, 'The trasparent data encryption (TDE) certificate required for restoring has not been backed up in the last 90 days.'
+		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' has not been backed up since: ' + CAST(c.pvt_key_last_backup_date AS VARCHAR(100))
 		, 'Make sure you have a recent backup of your certificate in a secure location in case you need to restore your encrypted database.'
 		, 'https://straightpathsql.com/cb/tde-certificate-no-backup'
@@ -921,11 +1077,14 @@ IF @Mode IN (0,99) BEGIN
 
 
 	/* check TDE certificate expiration dates */
-	INSERT #Checks WITH (TABLOCK)
+	INSERT #Results
 	SELECT
 		2
-		, db_name(d.database_id)
+		, 213
+		, 2
 		, 'TDE certificate set to expire'
+		, 'The trasparent data encryption (TDE) certificate required for restoring is set to expire.'
+		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' is set to expire on: ' + CAST(c.expiry_date AS VARCHAR(100))
 		, 'Although you will still be able to backup or restore your encrypted database with an expired certificate, these should be changed regularly like passwords.'
 		, 'https://straightpathsql.com/cb/tde-certificate-expiring'
@@ -939,26 +1098,32 @@ IF @Mode IN (0,99) BEGIN
 
 		SET @SQL = '
 		SELECT DISTINCT
-			1
-			, b.[database_name]
+			2
+			, 210
+			, 1
 			, ''Database backup certificate never been backed up.''
+			, ''A certificate used for backups has never been backed up.''
+			, b.[database_name]
 			, ''The certificate '' + c.name + '' used to encrypt database backups for '' + b.[database_name] + '' has never been backed up.''
 			, ''Make sure you have a recent backup of your certificate in a secure location in case you need to restore encrypted database backups.''
 			, ''https://straightpathsql.com/cb/database-backup-certificate-no-backup''
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
 			ON c.thumbprint = b.encryptor_thumbprint
-		WHERE c.pvt_key_last_backup_date IS NULL';
+		WHERE c.pvt_key_last_backup_date IS NULL;';
 
-		INSERT #Checks WITH (TABLOCK)
+		INSERT #Results
 		EXEC sp_executesql @SQL
 
 
 		SET @SQL = '
 		SELECT DISTINCT
-			1
-			, b.[database_name]
+			2
+			, 210
+			, 1
 			, ''Database backup certificate not backed up recently.''
+			, ''A certificate used for backups has not been backed up in the last 90 days.''
+			, b.[database_name]
 			, ''The certificate '' + c.name + '' used to encrypt database backups for '' + b.[database_name] + '' has not been backed up since: '' + CAST(c.pvt_key_last_backup_date AS VARCHAR(100))
 			, ''Make sure you have a recent backup of your certificate in a secure location in case you need to restore encrypted database backups.''
 			, ''https://straightpathsql.com/cb/database-backup-certificate-no-backup''
@@ -967,29 +1132,32 @@ IF @Mode IN (0,99) BEGIN
 			ON c.thumbprint = b.encryptor_thumbprint
 		WHERE c.pvt_key_last_backup_date <= DATEADD(dd, -90, GETDATE());';
 
-		INSERT #Checks WITH (TABLOCK)
+		INSERT #Results
 		EXEC sp_executesql @SQL
 
 
 	/* check for database backup certificate expiration dates */
 		SET @SQL = '
 		SELECT DISTINCT
-			1
-			, b.[database_name]
+			2
+			, 212
+			, 1
 			, ''Database backup certificate set to expire.''
+			, ''A certificate used for backups is set to expire.''
+			, b.[database_name]
 			, ''The certificate '' + c.name + '' used to encrypt database '' + b.[database_name] + '' is set to expire on: '' + CAST(c.expiry_date AS VARCHAR(100))
 			, ''You will not be able to backup or restore your encrypted database backups with an expired certificate, so these should be changed regularly like passwords.''
 			, ''https://straightpathsql.com/cb/database-backup-expire''
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
-			ON c.thumbprint = b.encryptor_thumbprint';
+			ON c.thumbprint = b.encryptor_thumbprint;';
 
-		INSERT #Checks WITH (TABLOCK)
+		INSERT #Results
 		EXEC sp_executesql @SQL
 
 		END
 
-	/*Check for failed backups */
+	/* check for failed backups */
 	IF OBJECT_ID('tempdb..#FailedBackups') IS NOT NULL
 		DROP TABLE #FailedBackups;
 
@@ -1002,7 +1170,7 @@ IF @Mode IN (0,99) BEGIN
     SET @SQL = 'EXEC master.sys.sp_readerrorlog 0, 1, N''Backup Failed'''
 
 	INSERT #FailedBackups
-	EXEC sp_MSforeachdb @SQL
+	EXEC sp_executesql @SQL
 
 	;WITH FailedBackups AS (
 	SELECT DISTINCT
@@ -1013,33 +1181,88 @@ IF @Mode IN (0,99) BEGIN
 	WHERE fb.LogDate >= @StartDate
 	    AND fb.LogDate <= @EndDate
     )
-	INSERT #Checks WITH (TABLOCK)
+
+	INSERT #Results
 	SELECT
 		2
-		, NULL
-		, 'Failed backups'
+		, 207
+		, 1
+		, 'Failed database backups'
+		, 'Failed backup occurred on ' + CONVERT(VARCHAR(10), fb.LogDate, 101)
+		, fb.DatabaseName
 		, fb.Issue
 		, 'Review the SQL Server Log to find out more about any failed backups.'
 		, 'https://straightpathsql.com/cb/failed-backup'
 	FROM FailedBackups fb
+	WHERE DatabaseName = COALESCE(@DatabaseName, DatabaseName)
+
+	/* find databases not meeting Recovery Point Objective (RPO) */
+	IF @RPO IS NOT NULL BEGIN
+		;WITH MostRecentBackup AS (
+		SELECT
+			 d.[name] AS DatabaseName
+			, COALESCE(MAX(lb.LastBackupDate), '1/1/1900 00:00:00') AS LastBackupDate
+		FROM master.sys.databases d
+		LEFT JOIN #LastBackup lb
+			ON d.[name] = lb.DatabaseName
+		WHERE d.[name] = COALESCE(@DatabaseName, d.[name]) 
+		GROUP BY
+			d.[name]
+		)
+
+		INSERT #Results
+		SELECT
+			2
+			, 214
+			, 1
+			, 'Missed RPO'
+			, 'Database not meeting the Recovery Point Objective(RPO).'
+			, DatabaseName
+			, 'That database ' + DatabaseName + ' has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has not been backed up in the last '
+				+ CONVERT(VARCHAR(10), DATEDIFF(mi, LastBackupDate, GETDATE())) + ' minutes.'
+			, 'Check the backup schedule for this database to make sure you are meeting the RPO.'
+			, 'https://straightpathsql.com/cb/recovery-point-objective'
+		FROM MostRecentBackup
+		WHERE LastBackupDate <> '1/1/1900 00:00:00'
+			AND DATEDIFF(mi, LastBackupDate, GETDATE()) > @RPO
+
+		UNION
+
+		SELECT
+			2
+			, 214
+			, 1
+			, 'Missed RPO'
+			, 'Database not meeting the Recovery Point Objective(RPO).'
+			, DatabaseName
+			, 'That database ' + DatabaseName + ' has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has never been backed up.'
+			, 'Check the backup schedule for this database to make sure you are meeting the RPO.'
+			, 'https://straightpathsql.com/cb/recovery-point-objective'
+		FROM MostRecentBackup
+		WHERE LastBackupDate = '1/1/1900 00:00:00';
+
+		END
 
 	SELECT
-		CASE c.Importance
-			WHEN 1 THEN 'High'
-			WHEN 2 THEN 'Medium'
-			WHEN 3 THEN 'Low'
-			END AS Importance
-        , c.DatabaseName
-		, c.Issue
-		, c.Details
-		, c.ActionStep
-		, c.ReadMoreURL
-	FROM #Checks c
-	ORDER BY
-	    c.Importance
-		, c.DatabaseName
-		, c.Issue
-		, c.Details
+	    CASE CategoryID
+            WHEN 2 THEN 'Recoverability'
+		END AS Category
+        , CASE Importance
+            WHEN 1 THEN 'High'
+		    WHEN 2 THEN 'Medium'
+			ELSE 'Low'
+		END AS Importance
+        , CheckName
+        , Issue
+        , DatabaseName
+        , Details
+        , ActionStep
+        , ReadMoreURL
+    FROM #Results
+    ORDER BY
+        Importance
+		, Category
+		, CheckName;
 
 	END
 GO

@@ -5,26 +5,40 @@ GO
 
 ALTER PROCEDURE dbo.sp_CheckBackup
     @Mode TINYINT = 99 
-    , @ShowCopyOnly BIT = 1
+    , @ShowCopyOnly BIT = NULL
     , @DatabaseName NVARCHAR(128) = NULL
 	, @BackupType CHAR(1) = NULL
+	, @DeviceType VARCHAR(30) = NULL
 	, @StartDate DATETIME = NULL
 	, @EndDate DATETIME = NULL
 	, @RPO INT = NULL
 	, @Override BIT = 0
 	, @Help BIT = 0
+	, @VersionCheck BIT = 0
 
 WITH RECOMPILE
 AS
 SET NOCOUNT ON;
+
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 
 DECLARE 
     @Version VARCHAR(10) = NULL
 	, @VersionDate DATETIME = NULL
 
 SELECT
-    @Version = '2.0'
-    , @VersionDate = '20250509';
+    @Version = '2026.2.1'
+    , @VersionDate = '20260219';
+
+/* Version check */
+IF @VersionCheck = 1 BEGIN
+
+	SELECT
+		@Version AS VersionNumber
+		, @VersionDate AS VersionDate
+
+	RETURN;
+	END; 
 
 /* @Help = 1 */
 IF @Help = 1 BEGIN
@@ -48,17 +62,22 @@ IF @Help = 1 BEGIN
     Parameters:
 
     @Mode  0=Show only problematic issues, unfiltered
-           1=Summary one fact-filled row per database(DEFAULT), may be filtered
+           1=Summary one fact-filled row per database, may be filtered
 		   2=Detail, all backup history, may be filtered
 		   3=Backup chain check, may be filtered, look for any number > 1
 		   4=Shows results of 1, 2, and 3, and may be filtered
 		   5=Shows restore history, and may be filtered
+		   99=Shows result sets for both @Mode = 1 and @Mode = 2 (DEFAULT)
 
-    @ShowCopyOnly 0=Hide Copy Only backups(DEFAULT), 1=Show Copy Only backups
+    @ShowCopyOnly:	0=Hide Copy Only backups
+					1=Show ONLY Copy Only backups
+					NULL=Show all backups (DEFAULT)
 
     @DatabaseName for filtering on one specific database
 
-	@BackupType for filtering, F = Full, D = Differential, L = Log
+	@BackupType for filtering: ''F'' = Full, ''D'' = Differential, ''L'' = Log
+
+	@DeviceType for filtering: ''Disk'', ''Tape'', ''Virtual Device'', ''Azure Storage''
 
 	@StartDate for filtering
 
@@ -76,7 +95,7 @@ IF @Help = 1 BEGIN
     	
     All other copyrights for sp_CheckBackup are held by Straight Path Solutions.
     
-    Copyright 2025 Straight Path IT Solutions, LLC
+    Copyright 2026 Straight Path IT Solutions, LLC
     
     Permission is hereby granted, free of charge, to any person obtaining a copy
     of this software and associated documentation files (the "Software"), to deal
@@ -102,7 +121,7 @@ IF @Help = 1 BEGIN
 
 
 /* Check if @Override needed for too many databases */
-IF @Override = 0 AND ((SELECT COUNT(database_id) from sys.databases) > 50) BEGIN
+IF @Override = 0 AND ((SELECT COUNT(database_id) from sys.databases) > 50) AND @DatabaseName IS NULL BEGIN
 	PRINT '
 	You have over 50 databases, so you could have a lot of backup history.
 
@@ -164,6 +183,16 @@ SELECT
 	@SQLVersionMajor = SUBSTRING(@SQLVersion, 1,CHARINDEX('.', @SQLVersion) + 1 )
 	, @SQLVersionMinor = PARSENAME(CONVERT(VARCHAR(32), @SQLVersion), 2);
 
+/* DeviceType */
+DECLARE @DeviceTypeTinyint TINYINT = NULL
+
+IF @DeviceType IS NOT NULL
+	SELECT @DeviceTypeTinyint = CASE @DeviceType
+		WHEN 'Disk' THEN 2
+		WHEN 'Tape' THEN 5
+		WHEN 'Virtual Device' THEN 7
+		WHEN 'Azure Storage' THEN 9
+		END
 
 /* grab the backup history */
 IF OBJECT_ID('tempdb..#LastBackup') IS NOT NULL
@@ -219,20 +248,6 @@ CREATE TABLE #BackupHistory (
 CREATE CLUSTERED INDEX PK_BackupHistory
 ON #BackupHistory (BackupSetID);
 
-CREATE INDEX IX_LastBackup
-ON #BackupHistory (IsCopyOnly, BackupType, FamilySequenceNumber)
-INCLUDE (DatabaseName);
-
-CREATE INDEX IX_BackupHistory_BackupPathCount
-ON #BackupHistory (IsCopyOnly, BackupStartDate)
-INCLUDE (InstanceName, DatabaseName, BackupType);
-
-CREATE INDEX IX_BackupHistory_BackupMissingChecksum
-ON #BackupHistory (BackupChecksum, IsCopyOnly, BackupStartDate, DatabaseName);
-
-CREATE INDEX IX_BackupHistory_BackupCheck
-ON #BackupHistory (InstanceName, DatabaseName, BackupType, BackupStartDate);
-
 
 INSERT #BackupHistory WITH (TABLOCK)
 SELECT
@@ -258,7 +273,7 @@ SELECT
 		WHEN 5 THEN 'Tape'
 		WHEN 7 THEN 'Virtual Device'
 		WHEN 9 THEN 'Azure Storage'
-		WHEN 2 THEN 'A permanent Backup Device'
+		WHEN 105 THEN 'A permanent Backup Device'
 		ELSE 'UNKNOWN'
 		END
 	, s.[user_name] AS UserName
@@ -273,8 +288,25 @@ WHERE s.server_name = SERVERPROPERTY('ServerName') /* backup run on current serv
 	AND d.is_in_standby = 0 /* not a log shipping target database */
 	AND d.source_database_id IS NULL /* exclude database snapshots */
 	AND s.database_name = COALESCE(@DatabaseName, s.database_name)
+	AND m.device_type = COALESCE(@DeviceTypeTinyint, m.device_type)
+	AND s.is_copy_only = COALESCE(@ShowCopyOnly, s.is_copy_only)
 	AND s.backup_start_date >= @StartDate
 	AND s.backup_start_date <= @EndDate;
+
+CREATE INDEX IX_LastBackup
+ON #BackupHistory (IsCopyOnly, BackupType, FamilySequenceNumber)
+INCLUDE (DatabaseName);
+
+CREATE INDEX IX_BackupHistory_BackupPathCount
+ON #BackupHistory (IsCopyOnly, BackupStartDate)
+INCLUDE (InstanceName, DatabaseName, BackupType);
+
+CREATE INDEX IX_BackupHistory_BackupMissingChecksum
+ON #BackupHistory (BackupChecksum, IsCopyOnly, BackupStartDate, DatabaseName);
+
+CREATE INDEX IX_BackupHistory_BackupCheck
+ON #BackupHistory (InstanceName, DatabaseName, BackupType, BackupStartDate);
+
 
 /* grab backup paths for split backup checks */
 IF OBJECT_ID('tempdb..#BackupPath') IS NOT NULL
@@ -371,6 +403,7 @@ IF @Mode IN (1,4,99) BEGIN
         , AvailabilityGroupPreferredBackup BIT
 		, CurrentRecoveryModel NVARCHAR(20)
 		, MinutesSinceLastBackup INT
+		, LastFullCopyOnly VARCHAR(3)
 		, LastFullStart DATETIME
 		, LastFullFinish DATETIME
 		, LastFullDuration NVARCHAR(30)
@@ -426,10 +459,12 @@ IF @Mode IN (1,4,99) BEGIN
 				DatabaseName
 				, MAX(BackupSetID) AS BackupSetID
 			FROM #BackupHistory
+/*
 			WHERE IsCopyOnly = CASE
 				WHEN @ShowCopyOnly = 1 THEN IsCopyOnly
 				ELSE 0
 				END
+*/			WHERE IsCopyOnly = COALESCE(@ShowCopyOnly, IsCopyOnly)
 				AND FamilySequenceNumber = 1
 				AND BackupType = 'D'
 			GROUP BY
@@ -451,6 +486,10 @@ IF @Mode IN (1,4,99) BEGIN
 		, bs.LastFullDeviceType = bh.DeviceType
 		, bs.LastFullSizeInMB = CAST(bh.BackupSize / 1048576 AS INT)
 		, bs.LastFullNumberOfFiles = lb.NumberOfFiles
+		, bs.LastFullCopyOnly = CASE bh.IsCopyOnly
+			WHEN 1 THEN 'Yes'
+			ELSE 'No'
+			END
 	FROM #BackupSummary bs
 	LEFT JOIN LastBackupFull lb
 	    ON bs.DatabaseName = lb.DatabaseName
@@ -472,10 +511,12 @@ IF @Mode IN (1,4,99) BEGIN
 				DatabaseName
 				, MAX(BackupSetID) AS BackupSetID
 			FROM #BackupHistory
+/*
 			WHERE IsCopyOnly = CASE
 				WHEN @ShowCopyOnly = 1 THEN IsCopyOnly
 				ELSE 0
 				END
+*/			WHERE IsCopyOnly = COALESCE(@ShowCopyOnly, IsCopyOnly)
 				AND FamilySequenceNumber = 1
 				AND BackupType = 'I'
 			GROUP BY
@@ -518,10 +559,12 @@ IF @Mode IN (1,4,99) BEGIN
 				DatabaseName
 				, MAX(BackupSetID) AS BackupSetID
 			FROM #BackupHistory
+/*
 			WHERE IsCopyOnly = CASE
 				WHEN @ShowCopyOnly = 1 THEN IsCopyOnly
 				ELSE 0
 				END
+*/			WHERE IsCopyOnly = COALESCE(@ShowCopyOnly, IsCopyOnly)
 				AND FamilySequenceNumber = 1
 				AND BackupType = 'L'
 			GROUP BY
@@ -584,6 +627,7 @@ IF @Mode IN (1,4,99) BEGIN
 			END AS AvailabilityGroupPreferredBackup
 		, CurrentRecoveryModel
 		, MinutesSinceLastBackup
+		, LastFullCopyOnly
 		, LastFullStart
 		, LastFullFinish
 		, LastFullDuration
@@ -673,6 +717,7 @@ IF @Mode IN (2,4) BEGIN
 		, bh.LogicalDevice
 		, bh.DeviceType
 		, bh.UserName
+		, bh.FamilySequenceNumber
 	FROM #BackupHistory bh
 	INNER JOIN BackupFileCount bc
 	    ON bh.BackupSetID = bc.BackupSetID
@@ -683,10 +728,12 @@ IF @Mode IN (2,4) BEGIN
 		AND bh.BackupType = COALESCE(@BackupType, bh.BackupType)
 		AND bh.BackupStartDate >= COALESCE(@StartDate, bh.BackupStartDate)
 		AND bh.BackupStartDate <= COALESCE(@EndDate, bh.BackupStartDate)
+/*
 		AND bh.IsCopyOnly = CASE
 			WHEN @ShowCopyOnly = 1 THEN bh.IsCopyOnly
 			ELSE 0
 			END
+*/		AND bh.IsCopyOnly = COALESCE(@ShowCopyOnly, bh.IsCopyOnly)
 	ORDER BY 
 		bh.BackupStartDate DESC;
 
@@ -767,7 +814,7 @@ IF @Mode IN (5) BEGIN
 			, r.user_name AS UserName
 			, ROW_NUMBER() OVER (PARTITION BY d.Name ORDER BY r.[restore_date] DESC) AS RowNumber
 	FROM master.sys.databases d
-	LEFT OUTER JOIN msdb.dbo.[restorehistory] r ON r.[destination_database_name] = d.Name
+	LEFT OUTER JOIN msdb.dbo.[restorehistory] r ON r.[destination_database_name] = d.[name]
 	)
 	SELECT
 		DatabaseName
@@ -817,7 +864,7 @@ IF @Mode IN (0,99) BEGIN
 	CREATE TABLE #Results (
 		CategoryID TINYINT
 		, CheckID INT
-		, Importance TINYINT
+		, [Importance] TINYINT
 		, CheckName VARCHAR(50)
 		, Issue NVARCHAR(1000)
 		, DatabaseName NVARCHAR(255)
@@ -845,52 +892,54 @@ IF @Mode IN (0,99) BEGIN
 		)
 		AND value_in_use = 0;
 
-	/* Backup Checksum not enabled */
-	INSERT #Results
-	SELECT 
-		2
-		, 209
-		, 2
-		, 'Backup checksum'
-		, 'Configuration ' + [name] + ' not enabled'
-		, NULL
-		, 'Backup checksum helps validate the consistency of backup files.'
-		, 'We recommend enabling ' + [name] + ' to complete checksum verification by default and reduce the likelihood of any corrupted backup files.'
-		, 'https://straightpathsql.com/cb/backup-checksum'
-	FROM sys.configurations
-	WHERE [name] IN (
-		'backup checksum'
-		, 'backup checksum default'
-		)
-		AND value_in_use = 0;
+	IF @SQLVersionMajor > 11 BEGIN
+		/* Backup Checksum not enabled */
+		INSERT #Results
+		SELECT 
+			2
+			, 209
+			, 2
+			, 'Backup checksum'
+			, 'Configuration ' + [name] + ' not enabled'
+			, NULL
+			, 'Backup checksum helps validate the consistency of backup files.'
+			, 'We recommend enabling ' + [name] + ' to complete checksum verification by default and reduce the likelihood of any corrupted backup files.'
+			, 'https://straightpathsql.com/cb/backup-checksum'
+		FROM sys.configurations
+		WHERE [name] IN (
+			'backup checksum'
+			, 'backup checksum default'
+			)
+			AND value_in_use = 0;
 
-    /* Backups without checksum */
-	;WITH BackupMissingChecksum AS (
-	    SELECT
-		    bh.DatabaseName
-			, COUNT(bh.BackupSetID) AS NumberOfBackups
-		FROM #BackupHistory bh
-		WHERE bh.BackupChecksum = 0
-		    AND bh.IsCopyOnly = 0
-	        AND bh.BackupStartDate >= @StartDate
-		    AND bh.BackupStartDate <= @EndDate
-		GROUP BY bh.DatabaseName
-		)
+		/* Backups without checksum */
+		;WITH BackupMissingChecksum AS (
+			SELECT
+				bh.DatabaseName
+				, COUNT(bh.BackupSetID) AS NumberOfBackups
+			FROM #BackupHistory bh
+			WHERE bh.BackupChecksum = 0
+				AND bh.IsCopyOnly = 0
+				AND bh.BackupStartDate >= @StartDate
+				AND bh.BackupStartDate <= @EndDate
+			GROUP BY bh.DatabaseName
+			)
 
-	INSERT #Results
-	SELECT
-		2
-		, 202
-		, 2
-		, 'Backups without checksum'
-		, 'Recent backups created without using checksum'
-		, DatabaseName
-		, 'The database ' + bmc.DatabaseName + ' has had ' + CAST(bmc.NumberOfBackups AS VARCHAR(9)) + ' recent backups without a checksum.'
-		, 'We recommend verifying all backups with checksum to reduce the likelihood of any corrupted backup files.'
-		, 'https://straightpathsql.com/cb/backup-checksum'
-    FROM BackupMissingChecksum bmc
-	WHERE DatabaseName = COALESCE(@DatabaseName, DatabaseName);
+		INSERT #Results
+		SELECT
+			2
+			, 202
+			, 2
+			, 'Backups without checksum'
+			, 'Recent backups created without using checksum'
+			, DatabaseName
+			, 'The database ' + bmc.DatabaseName + ' has had ' + CAST(bmc.NumberOfBackups AS VARCHAR(9)) + ' recent backups without a checksum.'
+			, 'We recommend verifying all backups with checksum to reduce the likelihood of any corrupted backup files.'
+			, 'https://straightpathsql.com/cb/backup-checksum'
+		FROM BackupMissingChecksum bmc
+		WHERE DatabaseName = COALESCE(@DatabaseName, DatabaseName);
 
+		END
 
     /* Missing Full backups */
 	INSERT #Results
@@ -901,7 +950,7 @@ IF @Mode IN (0,99) BEGIN
 		, 'Missing full backup'
 		, 'Database missing full backups'
 		, d.[name]
-		, 'That database ' + d.[name] + ' has not had any full backups.'
+		, 'The database ' + d.[name] + ' has not had any full backups.'
 		, 'If the data in this database is important, you need to make a full backup to recover the data.'
 		, 'https://straightpathsql.com/cb/missing-backups'
 	FROM master.sys.databases d
@@ -928,7 +977,7 @@ IF @Mode IN (0,99) BEGIN
 		, 'Missing log backup'
 		, 'Database missing log backups'
 		, d.[name]
-		, 'That database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups.'
+		, 'The database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups.'
 		, 'If point in time recovery is important to you, you need to take regular log backups.'
 		, 'https://straightpathsql.com/cb/missing-backups'
 	FROM master.sys.databases d
@@ -956,7 +1005,7 @@ IF @Mode IN (0,99) BEGIN
 		, 'No recent full backup'
 		, 'No full backup in the last 7 days'
         , d.[name]
-		, 'That database ' + d.[name] + ' has not had any full backups in over a week.'
+		, 'The database ' + d.[name] + ' has not had any full backups in over a week.'
 		, 'If the data in this database is important, you need to make regular full backups to recover the data.'
 		, 'https://straightpathsql.com/cb/recovery-point-objective'
 	FROM master.sys.databases d
@@ -982,7 +1031,7 @@ IF @Mode IN (0,99) BEGIN
 		, 'No recent log backup'
 		, 'No log backup in the last day'
 		, d.[name]
-		, 'That database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups in the last hour.'
+		, 'The database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups in the last hour.'
 		, 'If point in time recovery is important to you, you need to take regular log backups.'
 		, 'https://straightpathsql.com/cb/recovery-point-objective'
 	FROM master.sys.databases d
@@ -1029,7 +1078,7 @@ IF @Mode IN (0,99) BEGIN
 		, 'Split backup chain'
 		, 'Databases with backups in more than one location will be difficult to restore.'
 		, bpc.DatabaseName
-		, 'That database ' + bpc.DatabaseName + ' appears to have a split backup chain for ' 
+		, 'The database ' + bpc.DatabaseName + ' appears to have a split backup chain for ' 
 		    + CASE bpc.BackupType
 			    WHEN 'D' THEN 'Full'
 			    WHEN 'I' THEN 'Differential'
@@ -1049,7 +1098,7 @@ IF @Mode IN (0,99) BEGIN
 		, 211
 		, 1
 		, 'TDE certificate never backed up'
-		, 'The trasparent data encryption (TDE) certificate required for restoring has never been backed up.'
+		, 'The transparent data encryption (TDE) certificate required for restoring has never been backed up.'
 		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' has never been backed up'
 		, 'Make a backup of your current certificate and store it in a secure location in case you need to restore this encrypted database.'
@@ -1110,7 +1159,8 @@ IF @Mode IN (0,99) BEGIN
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
 			ON c.thumbprint = b.encryptor_thumbprint
-		WHERE c.pvt_key_last_backup_date IS NULL;';
+		WHERE c.pvt_key_last_backup_date IS NULL
+			AND b.encryptor_thumbprint IS NOT NULL;';
 
 		INSERT #Results
 		EXEC sp_executesql @SQL
@@ -1130,7 +1180,8 @@ IF @Mode IN (0,99) BEGIN
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
 			ON c.thumbprint = b.encryptor_thumbprint
-		WHERE c.pvt_key_last_backup_date <= DATEADD(dd, -90, GETDATE());';
+		WHERE c.pvt_key_last_backup_date <= DATEADD(dd, -90, GETDATE())
+			AND b.encryptor_thumbprint IS NOT NULL;';
 
 		INSERT #Results
 		EXEC sp_executesql @SQL
@@ -1150,7 +1201,8 @@ IF @Mode IN (0,99) BEGIN
 			, ''https://straightpathsql.com/cb/database-backup-expire''
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
-			ON c.thumbprint = b.encryptor_thumbprint;';
+			ON c.thumbprint = b.encryptor_thumbprint
+		WHERE b.encryptor_thumbprint IS NOT NULL;';
 
 		INSERT #Results
 		EXEC sp_executesql @SQL
@@ -1167,7 +1219,7 @@ IF @Mode IN (0,99) BEGIN
         , LogText VARCHAR(1000)
 		);
 
-    SET @SQL = 'EXEC master.sys.sp_readerrorlog 0, 1, N''Backup Failed'''
+    SET @SQL = 'EXEC master.sys.sp_readerrorlog 0, 1, N''BACKUP failed to complete the command BACKUP'''
 
 	INSERT #FailedBackups
 	EXEC sp_executesql @SQL
@@ -1178,7 +1230,17 @@ IF @Mode IN (0,99) BEGIN
 		, LEFT(fb.LogText, CHARINDEX('.', fb.LogText)) AS Issue
 		, SUBSTRING (fb.LogText, 55, CHARINDEX('.', fb.LogText)-55) AS DatabaseName
 	FROM #FailedBackups fb
-	WHERE fb.LogDate >= @StartDate
+	WHERE fb.LogText LIKE '%BACKUP DATABASE%'
+	AND fb.LogDate >= @StartDate
+	    AND fb.LogDate <= @EndDate
+	UNION
+	SELECT DISTINCT
+		fb.LogDate
+		, LEFT(fb.LogText, CHARINDEX('.', fb.LogText)) AS Issue
+		, SUBSTRING (fb.LogText, 50, CHARINDEX('.', fb.LogText)-50) AS DatabaseName
+	FROM #FailedBackups fb
+	WHERE fb.LogText LIKE '%BACKUP LOG%'
+	AND fb.LogDate >= @StartDate
 	    AND fb.LogDate <= @EndDate
     )
 
@@ -1218,7 +1280,7 @@ IF @Mode IN (0,99) BEGIN
 			, 'Missed RPO'
 			, 'Database not meeting the Recovery Point Objective(RPO).'
 			, DatabaseName
-			, 'That database ' + DatabaseName + ' has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has not been backed up in the last '
+			, 'The database ' + DatabaseName + ' has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has not been backed up in the last '
 				+ CONVERT(VARCHAR(10), DATEDIFF(mi, LastBackupDate, GETDATE())) + ' minutes.'
 			, 'Check the backup schedule for this database to make sure you are meeting the RPO.'
 			, 'https://straightpathsql.com/cb/recovery-point-objective'
@@ -1235,7 +1297,7 @@ IF @Mode IN (0,99) BEGIN
 			, 'Missed RPO'
 			, 'Database not meeting the Recovery Point Objective(RPO).'
 			, DatabaseName
-			, 'That database ' + DatabaseName + ' has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has never been backed up.'
+			, 'The database ' + DatabaseName + ' has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has never been backed up.'
 			, 'Check the backup schedule for this database to make sure you are meeting the RPO.'
 			, 'https://straightpathsql.com/cb/recovery-point-objective'
 		FROM MostRecentBackup
@@ -1247,11 +1309,11 @@ IF @Mode IN (0,99) BEGIN
 	    CASE CategoryID
             WHEN 2 THEN 'Recoverability'
 		END AS Category
-        , CASE Importance
+        , CASE [Importance]
             WHEN 1 THEN 'High'
 		    WHEN 2 THEN 'Medium'
 			ELSE 'Low'
-		END AS Importance
+		END AS [Importance]
         , CheckName
         , Issue
         , DatabaseName
@@ -1260,11 +1322,9 @@ IF @Mode IN (0,99) BEGIN
         , ReadMoreURL
     FROM #Results
     ORDER BY
-        Importance
+        [Importance]
 		, Category
 		, CheckName;
 
 	END
 GO
-
-

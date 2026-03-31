@@ -27,8 +27,8 @@ DECLARE
 	, @VersionDate DATETIME = NULL
 
 SELECT
-    @Version = '2026.2.1'
-    , @VersionDate = '20260219';
+    @Version = '2026.3.1'
+    , @VersionDate = '20260320';
 
 /* Version check */
 IF @VersionCheck = 1 BEGIN
@@ -884,7 +884,7 @@ IF @Mode IN (0,99) BEGIN
 		, NULL
 		, 'Backup compression allows for smaller and faster backup files.'
 		, 'Unless there is blob, image, or XML data in your database, we recommend enabling ' + [name] + ' to get the benefits of compression.'
-		, 'https://straightpathsql.com/cb/backup-compression'
+		, 'https://straightpathsql.com/check/backup-compression'
 	FROM sys.configurations
 	WHERE [name] IN (
 		'backup compression'
@@ -904,7 +904,7 @@ IF @Mode IN (0,99) BEGIN
 			, NULL
 			, 'Backup checksum helps validate the consistency of backup files.'
 			, 'We recommend enabling ' + [name] + ' to complete checksum verification by default and reduce the likelihood of any corrupted backup files.'
-			, 'https://straightpathsql.com/cb/backup-checksum'
+			, 'https://straightpathsql.com/check/backup-checksum'
 		FROM sys.configurations
 		WHERE [name] IN (
 			'backup checksum'
@@ -935,7 +935,7 @@ IF @Mode IN (0,99) BEGIN
 			, DatabaseName
 			, 'The database ' + bmc.DatabaseName + ' has had ' + CAST(bmc.NumberOfBackups AS VARCHAR(9)) + ' recent backups without a checksum.'
 			, 'We recommend verifying all backups with checksum to reduce the likelihood of any corrupted backup files.'
-			, 'https://straightpathsql.com/cb/backup-checksum'
+			, 'https://straightpathsql.com/check/backup-checksum'
 		FROM BackupMissingChecksum bmc
 		WHERE DatabaseName = COALESCE(@DatabaseName, DatabaseName);
 
@@ -952,7 +952,7 @@ IF @Mode IN (0,99) BEGIN
 		, d.[name]
 		, 'The database ' + d.[name] + ' has not had any full backups.'
 		, 'If the data in this database is important, you need to make a full backup to recover the data.'
-		, 'https://straightpathsql.com/cb/missing-backups'
+		, 'https://straightpathsql.com/check/missing-backups'
 	FROM master.sys.databases d
     INNER JOIN #AvailabilityGroup ag
 	    ON d.database_id = ag.DatabaseID
@@ -979,7 +979,7 @@ IF @Mode IN (0,99) BEGIN
 		, d.[name]
 		, 'The database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups.'
 		, 'If point in time recovery is important to you, you need to take regular log backups.'
-		, 'https://straightpathsql.com/cb/missing-backups'
+		, 'https://straightpathsql.com/check/missing-backups'
 	FROM master.sys.databases d
     INNER JOIN #AvailabilityGroup ag
 	    ON d.database_id = ag.DatabaseID
@@ -1007,7 +1007,7 @@ IF @Mode IN (0,99) BEGIN
         , d.[name]
 		, 'The database ' + d.[name] + ' has not had any full backups in over a week.'
 		, 'If the data in this database is important, you need to make regular full backups to recover the data.'
-		, 'https://straightpathsql.com/cb/recovery-point-objective'
+		, 'https://straightpathsql.com/check/recovery-point-objective'
 	FROM master.sys.databases d
 	INNER JOIN #LastBackup lb
 		ON d.name COLLATE SQL_Latin1_General_CP1_CI_AS = lb.DatabaseName COLLATE SQL_Latin1_General_CP1_CI_AS
@@ -1033,7 +1033,7 @@ IF @Mode IN (0,99) BEGIN
 		, d.[name]
 		, 'The database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups in the last hour.'
 		, 'If point in time recovery is important to you, you need to take regular log backups.'
-		, 'https://straightpathsql.com/cb/recovery-point-objective'
+		, 'https://straightpathsql.com/check/recovery-point-objective'
 	FROM master.sys.databases d
     INNER JOIN #AvailabilityGroup ag
 	    ON d.database_id = ag.DatabaseID
@@ -1086,7 +1086,7 @@ IF @Mode IN (0,99) BEGIN
 			    END
 			+ ' backups.'
 		, 'We recommend having your backups in a single location, because split backup chains can create a headache when you need to restore.'
-		, 'https://straightpathsql.com/cb/split-backup-chain'
+		, 'https://straightpathsql.com/check/split-backup-chain'
 	FROM BackupPathCount bpc
 	WHERE bpc.NumberOfPaths > 1
 
@@ -1102,7 +1102,7 @@ IF @Mode IN (0,99) BEGIN
 		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' has never been backed up'
 		, 'Make a backup of your current certificate and store it in a secure location in case you need to restore this encrypted database.'
-		, 'https://straightpathsql.com/cb/tde-certificate-no-backup'
+		, 'https://straightpathsql.com/check/tde-certificate-no-backup'
 	FROM sys.certificates c 
 	INNER JOIN sys.dm_database_encryption_keys d 
 		ON c.thumbprint = d.encryptor_thumbprint
@@ -1118,7 +1118,7 @@ IF @Mode IN (0,99) BEGIN
 		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' has not been backed up since: ' + CAST(c.pvt_key_last_backup_date AS VARCHAR(100))
 		, 'Make sure you have a recent backup of your certificate in a secure location in case you need to restore your encrypted database.'
-		, 'https://straightpathsql.com/cb/tde-certificate-no-backup'
+		, 'https://straightpathsql.com/check/tde-certificate-no-backup'
 	FROM sys.certificates c 
 	INNER JOIN sys.dm_database_encryption_keys d 
 		ON c.thumbprint = d.encryptor_thumbprint
@@ -1136,7 +1136,7 @@ IF @Mode IN (0,99) BEGIN
 		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' is set to expire on: ' + CAST(c.expiry_date AS VARCHAR(100))
 		, 'Although you will still be able to backup or restore your encrypted database with an expired certificate, these should be changed regularly like passwords.'
-		, 'https://straightpathsql.com/cb/tde-certificate-expiring'
+		, 'https://straightpathsql.com/check/tde-certificate-expiring'
 	FROM sys.certificates c 
 	INNER JOIN sys.dm_database_encryption_keys d 
 		ON c.thumbprint = d.encryptor_thumbprint;
@@ -1155,7 +1155,7 @@ IF @Mode IN (0,99) BEGIN
 			, b.[database_name]
 			, ''The certificate '' + c.name + '' used to encrypt database backups for '' + b.[database_name] + '' has never been backed up.''
 			, ''Make sure you have a recent backup of your certificate in a secure location in case you need to restore encrypted database backups.''
-			, ''https://straightpathsql.com/cb/database-backup-certificate-no-backup''
+			, ''https://straightpathsql.com/check/database-backup-certificate-no-backup''
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
 			ON c.thumbprint = b.encryptor_thumbprint
@@ -1176,7 +1176,7 @@ IF @Mode IN (0,99) BEGIN
 			, b.[database_name]
 			, ''The certificate '' + c.name + '' used to encrypt database backups for '' + b.[database_name] + '' has not been backed up since: '' + CAST(c.pvt_key_last_backup_date AS VARCHAR(100))
 			, ''Make sure you have a recent backup of your certificate in a secure location in case you need to restore encrypted database backups.''
-			, ''https://straightpathsql.com/cb/database-backup-certificate-no-backup''
+			, ''https://straightpathsql.com/check/database-backup-certificate-no-backup''
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
 			ON c.thumbprint = b.encryptor_thumbprint
@@ -1198,7 +1198,7 @@ IF @Mode IN (0,99) BEGIN
 			, b.[database_name]
 			, ''The certificate '' + c.name + '' used to encrypt database '' + b.[database_name] + '' is set to expire on: '' + CAST(c.expiry_date AS VARCHAR(100))
 			, ''You will not be able to backup or restore your encrypted database backups with an expired certificate, so these should be changed regularly like passwords.''
-			, ''https://straightpathsql.com/cb/database-backup-expire''
+			, ''https://straightpathsql.com/check/database-backup-expire''
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
 			ON c.thumbprint = b.encryptor_thumbprint
@@ -1254,7 +1254,7 @@ IF @Mode IN (0,99) BEGIN
 		, fb.DatabaseName
 		, fb.Issue
 		, 'Review the SQL Server Log to find out more about any failed backups.'
-		, 'https://straightpathsql.com/cb/failed-backup'
+		, 'https://straightpathsql.com/check/failed-backup'
 	FROM FailedBackups fb
 	WHERE DatabaseName = COALESCE(@DatabaseName, DatabaseName)
 
@@ -1280,10 +1280,10 @@ IF @Mode IN (0,99) BEGIN
 			, 'Missed RPO'
 			, 'Database not meeting the Recovery Point Objective(RPO).'
 			, DatabaseName
-			, 'The database ' + DatabaseName + ' has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has not been backed up in the last '
+			, 'The database [' + DatabaseName + '] has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has not been backed up in the last '
 				+ CONVERT(VARCHAR(10), DATEDIFF(mi, LastBackupDate, GETDATE())) + ' minutes.'
 			, 'Check the backup schedule for this database to make sure you are meeting the RPO.'
-			, 'https://straightpathsql.com/cb/recovery-point-objective'
+			, 'https://straightpathsql.com/check/recovery-point-objective'
 		FROM MostRecentBackup
 		WHERE LastBackupDate <> '1/1/1900 00:00:00'
 			AND DATEDIFF(mi, LastBackupDate, GETDATE()) > @RPO
@@ -1297,34 +1297,50 @@ IF @Mode IN (0,99) BEGIN
 			, 'Missed RPO'
 			, 'Database not meeting the Recovery Point Objective(RPO).'
 			, DatabaseName
-			, 'The database ' + DatabaseName + ' has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has never been backed up.'
+			, 'The database [' + DatabaseName + '] has an RPO of ' + CONVERT(VARCHAR(10), @RPO) + ' minutes, but it has never been backed up.'
 			, 'Check the backup schedule for this database to make sure you are meeting the RPO.'
-			, 'https://straightpathsql.com/cb/recovery-point-objective'
+			, 'https://straightpathsql.com/check/recovery-point-objective'
 		FROM MostRecentBackup
 		WHERE LastBackupDate = '1/1/1900 00:00:00';
-
+		
 		END
 
-	SELECT
-	    CASE CategoryID
-            WHEN 2 THEN 'Recoverability'
-		END AS Category
-        , CASE [Importance]
-            WHEN 1 THEN 'High'
-		    WHEN 2 THEN 'Medium'
-			ELSE 'Low'
-		END AS [Importance]
-        , CheckName
-        , Issue
-        , DatabaseName
-        , Details
-        , ActionStep
-        , ReadMoreURL
-    FROM #Results
-    ORDER BY
-        [Importance]
-		, Category
-		, CheckName;
-
+/* password protected databases - discontinued in SQL Server 2012 */
+IF @SQLVersionMajor < 11 BEGIN
+	SELECT DISTINCT
+		2
+		, 215
+		, 2
+		, 'Password protected backups'
+		, 'The database [' + DatabaseName + '] has had password protected backups recently.'
+		, DatabaseName
+		, 'If you do not have the password used to back up the database, you will not be able to restore it.'
+		, 'Make sure the password used to back up this database is stored where administrators can access it if needed.'
+		, 'https://straightpathsql.com/check/password-protected-backup'
+	FROM #BackupHistory
+	WHERE IsPasswordProtected = 1;
 	END
+
+SELECT
+	CASE CategoryID
+        WHEN 2 THEN 'Recoverability'
+	END AS Category
+    , CASE [Importance]
+        WHEN 1 THEN 'High'
+		WHEN 2 THEN 'Medium'
+		ELSE 'Low'
+	END AS [Importance]
+    , CheckName
+    , Issue
+    , DatabaseName
+    , Details
+    , ActionStep
+    , ReadMoreURL
+FROM #Results
+ORDER BY
+    [Importance]
+	, Category
+	, CheckName;
+
+END
 GO

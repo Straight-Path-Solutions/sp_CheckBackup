@@ -27,8 +27,8 @@ DECLARE
 	, @VersionDate DATETIME = NULL
 
 SELECT
-    @Version = '2026.3.1'
-    , @VersionDate = '20260320';
+    @Version = '2026.4.1'
+    , @VersionDate = '20260420';
 
 /* Version check */
 IF @VersionCheck = 1 BEGIN
@@ -174,7 +174,8 @@ VALUES
 	, ('2016', 13)
 	, ('2017', 14)
 	, ('2019', 15)
-	, ('2022', 16);
+	, ('2022', 16)
+	, ('2025', 17);
 
 /* SQL Server version */
 SELECT @SQLVersion = CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128));
@@ -233,10 +234,12 @@ CREATE TABLE #BackupHistory (
 	, IsCopyOnly BIT
 	, IsSnapshot BIT
 	, IsPasswordProtected BIT
+	, EncryptionType NVARCHAR(32)
 	, BackupChecksum BIT
 	, BackupStartDate DATETIME
 	, BackupFinishDate DATETIME
 	, BackupSize NUMERIC(20,0)
+	, CompressedBackupSize NUMERIC(20,0)
 	, MediaSetID INT
 	, FamilySequenceNumber TINYINT
 	, PhysicalDevice NVARCHAR(260)
@@ -260,10 +263,12 @@ SELECT
 	, s.is_copy_only
 	, s.is_snapshot
 	, s.is_password_protected
+	, s.encryptor_type
 	, s.has_backup_checksums
 	, s.backup_start_date
 	, s.backup_finish_date
     , s.backup_size
+	, s.compressed_backup_size
 	, m.media_set_id
 	, m.family_sequence_number
 	, m.physical_device_name AS PhysicalDevice
@@ -709,10 +714,13 @@ IF @Mode IN (2,4) BEGIN
 			WHEN 1 THEN 'Yes'
 			ELSE 'No'
 			END AS HasBackupChecksum
+		, COALESCE(bh.EncryptionType, 'None') AS EncryptionType
 		, bh.BackupStartDate
 		, bh.BackupFinishDate
 		, DATEDIFF(second, bh.BackupStartDate, bh.BackupFinishDate) AS DurationSeconds
-		, CAST((bh.BackupSize/bc.NumberOfFiles) / 1048576 AS INT)  AS SizeInMB
+		, CAST((bh.BackupSize/bc.NumberOfFiles) / 1048576 AS INT)  AS BackupSizeInMB
+		, CAST((bh.CompressedBackupSize/bc.NumberOfFiles) / 1048576 AS INT)  AS CompressedBackupSizeInMB
+		, CAST((1 - bh.CompressedBackupSize * 1.0 / NULLIF(bh.BackupSize, 0)) * 100 AS DECIMAL(5,2)) AS CompressionPercentage
 		, bh.PhysicalDevice
 		, bh.LogicalDevice
 		, bh.DeviceType
@@ -866,10 +874,10 @@ IF @Mode IN (0,99) BEGIN
 		, CheckID INT
 		, [Importance] TINYINT
 		, CheckName VARCHAR(50)
-		, Issue NVARCHAR(1000)
+		, Issue NVARCHAR(MAX)
 		, DatabaseName NVARCHAR(255)
-		, Details NVARCHAR(1000)
-		, ActionStep NVARCHAR(1000)
+		, Details NVARCHAR(MAX)
+		, ActionStep NVARCHAR(MAX)
 		, ReadMoreURL XML
 		);
 
@@ -1114,7 +1122,7 @@ IF @Mode IN (0,99) BEGIN
 		, 211
 		, 1
 		, 'TDE certificate not backed up recently'
-		, 'The trasparent data encryption (TDE) certificate required for restoring has not been backed up in the last 90 days.'
+		, 'The transparent data encryption (TDE) certificate required for restoring has not been backed up in the last 90 days.'
 		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' has not been backed up since: ' + CAST(c.pvt_key_last_backup_date AS VARCHAR(100))
 		, 'Make sure you have a recent backup of your certificate in a secure location in case you need to restore your encrypted database.'
@@ -1305,8 +1313,77 @@ IF @Mode IN (0,99) BEGIN
 		
 		END
 
+	/* backup history not purged */
+	INSERT #Results
+	SELECT TOP 1
+		2
+		, 216
+		, 2
+		, 'Backup history not purged'
+		, 'The backup history in msdb is retained back to ['
+			+ CAST(backup_start_date AS VARCHAR(20)) + '].'
+		, 'msdb'
+		, 'Not purging the backup history can cause the msdb database to grow significantly over time, and can make it difficult to find recent backup and restore history.'
+		, 'Schedule a process like a SQL Agent job to purge your backup history periodically using [sp_delete_backuphistory].'
+		, 'https://straightpathsql.com/check/backup-history-not-purged'
+	FROM msdb.dbo.backupset
+	WHERE backup_start_date <= DATEADD(dd, -90, GETDATE())
+	ORDER BY backup_start_date ASC;
+
+	/* check for high VLF count */
+	IF @SQLVersionMajor >= 13 BEGIN
+		INSERT #Results
+		SELECT
+			2
+			, 217
+			, 2
+			, 'High VLF count'
+			, 'The database ' + d.[name] + ' has ' + CONVERT(VARCHAR(10), ls.total_vlf_count) + ' virtual log files.'
+			, d.[name]
+			, 'A high number of VLFs can cause performance issues, especially for backup/restore operations and failovers.'
+			, 'Consider resizing the log file to reduce the number of VLFs, and then grow it back out to an appropriate size with less VLFs.'
+			, ''
+		FROM sys.databases d
+		CROSS APPLY sys.dm_db_log_stats(d.database_id) ls
+		WHERE ls.total_vlf_count > 200;
+		
+		END;
+
+	/* Log backups to NUL */
+	;WITH LogBackupsToNul AS (
+		SELECT
+			bh.DatabaseName
+			, COUNT(bh.BackupSetID) AS NumberOfBackups
+			, MAX(bh.BackupStartDate) AS LastNulBackup
+		FROM #BackupHistory bh
+		WHERE bh.BackupType = 'L'
+			AND bh.IsCopyOnly = 0
+			AND bh.BackupStartDate >= @StartDate
+			AND bh.BackupStartDate <= @EndDate
+			AND (
+				UPPER(LTRIM(RTRIM(bh.PhysicalDevice))) = 'NUL'
+				OR UPPER(LTRIM(RTRIM(bh.PhysicalDevice))) = 'NUL:'
+			)
+		GROUP BY bh.DatabaseName
+	)
+
+	INSERT #Results
+	SELECT
+		2
+		, 218
+		, 1
+		, 'Log backup to NUL'
+		, 'Log backups written to NUL device.'
+		, lbn.DatabaseName
+		, 'The database [' + lbn.DatabaseName + '] has had ' + CAST(lbn.NumberOfBackups AS VARCHAR(9)) + ' log backup(s) written to the NUL device. Most recent: ' + CONVERT(VARCHAR(20), lbn.LastNulBackup, 120) + '.'
+		, 'Backing up the transaction log to NUL discards the log records and breaks the log backup chain, making point-in-time recovery impossible. Investigate who or what is running BACKUP LOG ... TO DISK = ''NUL'' and stop it immediately.'
+		, 'https://straightpathsql.com/check/backup-to-nul'
+	FROM LogBackupsToNul lbn
+	WHERE lbn.DatabaseName = COALESCE(@DatabaseName, lbn.DatabaseName);
+
 /* password protected databases - discontinued in SQL Server 2012 */
 IF @SQLVersionMajor < 11 BEGIN
+	INSERT #Results
 	SELECT DISTINCT
 		2
 		, 215
@@ -1321,9 +1398,57 @@ IF @SQLVersionMajor < 11 BEGIN
 	WHERE IsPasswordProtected = 1;
 	END
 
+/* Missing integrity checks */
+IF OBJECT_ID('tempdb..#DBINFO') IS NOT NULL
+	DROP TABLE #DBINFO;
+
+CREATE TABLE #DBINFO (
+	ID INT IDENTITY(1, 1) PRIMARY KEY 
+	, ParentObject VARCHAR(255)
+	, [Object] VARCHAR(255)
+	, Field VARCHAR(255) 
+	, [Value] VARCHAR(255) 
+	, DatabaseName NVARCHAR(128) NULL
+	);
+
+EXEC sp_MSforeachdb N'USE [?];
+	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+	INSERT #DBINFO (ParentObject, Object, Field, Value)
+	EXEC (''DBCC DBINFO() With TableResults, NO_INFOMSGS'');
+	UPDATE #DBINFO SET DatabaseName = N''?'' WHERE DatabaseName IS NULL OPTION (RECOMPILE);';
+
+WITH CHECKDB AS (
+	SELECT DISTINCT
+		Field ,
+		Value ,
+		DatabaseName
+	FROM #DBINFO x
+	INNER JOIN master.sys.databases d ON x.DatabaseName = d.name
+	WHERE Field = 'dbi_dbccLastKnownGood'
+	)
+
+INSERT #Results
+SELECT
+	5
+	, 503
+	, 1
+	, 'Missing integrity checks'
+	, 'Database missing recent integrity checks'
+	, DatabaseName
+	, 'The database ' + DatabaseName + ' has not had any integrity checks in the last 2 weeks.'
+	, 'Regularly run DBCC CHECKDB to check for integrity issues that could indicate corruption.'
+	, ''		
+FROM CHECKDB
+WHERE DatabaseName <> 'tempdb'
+	AND DatabaseName NOT IN ( SELECT [name] FROM master.sys.databases WHERE is_read_only = 1)
+	AND CONVERT(DATETIME, CHECKDB.[Value], 121) < DATEADD(DD, -14, CURRENT_TIMESTAMP)
+	AND DatabaseName = COALESCE(@DatabaseName, DatabaseName);
+
+
 SELECT
 	CASE CategoryID
         WHEN 2 THEN 'Recoverability'
+		WHEN 5 THEN 'Integrity'
 	END AS Category
     , CASE [Importance]
         WHEN 1 THEN 'High'

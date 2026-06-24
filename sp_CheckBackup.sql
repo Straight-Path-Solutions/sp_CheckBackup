@@ -820,7 +820,7 @@ IF @Mode IN (5) BEGIN
 			[d].[name] AS DatabaseName
 			, r.restore_date AS RestoreDate
 			, r.user_name AS UserName
-			, ROW_NUMBER() OVER (PARTITION BY d.Name ORDER BY r.[restore_date] DESC) AS RowNumber
+			, ROW_NUMBER() OVER (PARTITION BY d.name ORDER BY r.[restore_date] DESC) AS RowNumber
 	FROM master.sys.databases d
 	LEFT OUTER JOIN msdb.dbo.[restorehistory] r ON r.[destination_database_name] = d.[name]
 	)

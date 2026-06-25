@@ -27,8 +27,8 @@ DECLARE
 	, @VersionDate DATETIME = NULL
 
 SELECT
-    @Version = '2026.4.1'
-    , @VersionDate = '20260420';
+    @Version = '2026.6.1'
+    , @VersionDate = '20260612';
 
 /* Version check */
 IF @VersionCheck = 1 BEGIN
@@ -54,7 +54,7 @@ IF @Help = 1 BEGIN
     
     Known limitations of this version:
     - sp_CheckBackup only works Microsoft-supported versions of SQL Server, so 
-    that means SQL Server 2014 or later.
+    that means SQL Server 2016 or later.
     - sp_CheckBackup will work with some earlier versions of SQL Server, but it 
     will skip a few checks. The results should still be valid and helpful, but you
     should really consider upgrading to a newer version.
@@ -67,7 +67,7 @@ IF @Help = 1 BEGIN
 		   3=Backup chain check, may be filtered, look for any number > 1
 		   4=Shows results of 1, 2, and 3, and may be filtered
 		   5=Shows restore history, and may be filtered
-		   99=Shows result sets for both @Mode = 1 and @Mode = 2 (DEFAULT)
+		   99=Shows result sets for both @Mode = 1 and @Mode = 0 (DEFAULT)
 
     @ShowCopyOnly:	0=Hide Copy Only backups
 					1=Show ONLY Copy Only backups
@@ -209,7 +209,7 @@ CREATE TABLE #LastBackup (
 INSERT #LastBackup
 SELECT
 	[database_name]
-	, server_name
+	, COALESCE(server_name, CONVERT(NVARCHAR(128), SERVERPROPERTY('ServerName'))) 
 	, [type]
 	, max(backup_start_date)
 FROM msdb.dbo.backupset
@@ -331,9 +331,7 @@ SELECT
 	WHEN CHARINDEX('/',REVERSE(bh.PhysicalDevice)) > 1 THEN SUBSTRING(bh.PhysicalDevice, 1, LEN(bh.PhysicalDevice)-CHARINDEX('/',REVERSE(bh.PhysicalDevice))+1)
 	END
 FROM #BackupHistory bh
-WHERE bh.FamilySequenceNumber = 1
-
-
+WHERE bh.FamilySequenceNumber = 1;
 
 /* grab databases and availability group info */
 IF OBJECT_ID('tempdb..#AvailabilityGroup') IS NOT NULL
@@ -347,11 +345,10 @@ CREATE TABLE #AvailabilityGroup (
 	, IsPreferredBackupReplica BIT
 	);
 
-
-/* Get Availability Group info for SQL Server 2012 and later */
-IF SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */ BEGIN
-	IF @SQLVersionMajor >= 11 BEGIN
-	    SET @SQL = '
+/* Get database and Availability Group info */
+/* AGs only apply to SQL Server 2012+ on boxed instances, not Azure SQL MI */
+IF @SQLVersionMajor >= 11 AND SERVERPROPERTY('EngineEdition') <> 8 BEGIN
+	SET @SQL = '
         SELECT
             d.database_id
             , d.[name]
@@ -359,22 +356,22 @@ IF SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */ BEGIN
             , ag.[name]
         	, CASE COALESCE(ag.[name],'''')
         	    WHEN '''' THEN NULL
-        		ELSE sys.fn_hadr_backup_is_preferred_replica (adc.database_name) 
+        		ELSE sys.fn_hadr_backup_is_preferred_replica (adc.database_name)
         		END
         FROM sys.databases d
         LEFT JOIN sys.availability_databases_cluster adc
             ON d.[name] = adc.database_name
-        LEFT JOIN sys.availability_groups  ag
+        LEFT JOIN sys.availability_groups ag
             ON adc.group_id = ag.group_id
-        WHERE d.database_id <> 2 
-        	AND d.state NOT IN (1, 6, 10) 
-        	AND d.is_in_standby = 0 
+        WHERE d.database_id <> 2
+        	AND d.state NOT IN (1, 6, 10)
+        	AND d.is_in_standby = 0
         	AND d.source_database_id IS NULL;'
-		END
+	END
 
-	/* For instances that exist prior to availability groups */
-	IF @SQLVersionMajor < 11 BEGIN
-	    SET @SQL = '
+/* Azure SQL MI, or any version before availability groups: no AG columns */
+IF @SQLVersionMajor < 11 OR SERVERPROPERTY('EngineEdition') = 8 BEGIN
+	SET @SQL = '
         SELECT
             d.database_id
             , d.[name]
@@ -382,16 +379,14 @@ IF SERVERPROPERTY('EngineEdition') <> 8 /* Azure Managed Instances */ BEGIN
             , NULL
         	, NULL
         FROM sys.databases d
-        WHERE d.database_id <> 2 
-        	AND d.state NOT IN (1, 6, 10) 
-        	AND d.is_in_standby = 0 
+        WHERE d.database_id > 4
+        	AND d.state NOT IN (1, 6, 10)
+        	AND d.is_in_standby = 0
         	AND d.source_database_id IS NULL;'
-		END
+	END
 
-        INSERT #AvailabilityGroup
-        EXEC sp_executesql @SQL
-        
-    END;
+INSERT #AvailabilityGroup
+EXEC sp_executesql @SQL;
 
 
 
@@ -464,12 +459,7 @@ IF @Mode IN (1,4,99) BEGIN
 				DatabaseName
 				, MAX(BackupSetID) AS BackupSetID
 			FROM #BackupHistory
-/*
-			WHERE IsCopyOnly = CASE
-				WHEN @ShowCopyOnly = 1 THEN IsCopyOnly
-				ELSE 0
-				END
-*/			WHERE IsCopyOnly = COALESCE(@ShowCopyOnly, IsCopyOnly)
+			WHERE IsCopyOnly = COALESCE(@ShowCopyOnly, IsCopyOnly)
 				AND FamilySequenceNumber = 1
 				AND BackupType = 'D'
 			GROUP BY
@@ -516,12 +506,7 @@ IF @Mode IN (1,4,99) BEGIN
 				DatabaseName
 				, MAX(BackupSetID) AS BackupSetID
 			FROM #BackupHistory
-/*
-			WHERE IsCopyOnly = CASE
-				WHEN @ShowCopyOnly = 1 THEN IsCopyOnly
-				ELSE 0
-				END
-*/			WHERE IsCopyOnly = COALESCE(@ShowCopyOnly, IsCopyOnly)
+			WHERE IsCopyOnly = COALESCE(@ShowCopyOnly, IsCopyOnly)
 				AND FamilySequenceNumber = 1
 				AND BackupType = 'I'
 			GROUP BY
@@ -564,12 +549,7 @@ IF @Mode IN (1,4,99) BEGIN
 				DatabaseName
 				, MAX(BackupSetID) AS BackupSetID
 			FROM #BackupHistory
-/*
-			WHERE IsCopyOnly = CASE
-				WHEN @ShowCopyOnly = 1 THEN IsCopyOnly
-				ELSE 0
-				END
-*/			WHERE IsCopyOnly = COALESCE(@ShowCopyOnly, IsCopyOnly)
+			WHERE IsCopyOnly = COALESCE(@ShowCopyOnly, IsCopyOnly)
 				AND FamilySequenceNumber = 1
 				AND BackupType = 'L'
 			GROUP BY
@@ -681,11 +661,6 @@ IF @Mode IN (2,4) BEGIN
 		bh.InstanceName
 		, bh.DatabaseName
 		, ag.GroupName AS AvailabilityGroupName
-		--, CASE ag.IsPreferredBackupReplica
-		--	WHEN 1 THEN 'Yes'
-		--	WHEN 0 THEN 'No'
-		--	ELSE NULL
-		--	END AS AvailabilityGroupPreferredBackup
 		, CASE bh.RecoveryModel 
 			WHEN 'S' THEN 'Simple'
 			WHEN 'B' THEN 'Bulk Logged'
@@ -701,7 +676,6 @@ IF @Mode IN (2,4) BEGIN
 			WHEN 1 THEN 'Yes'
 			ELSE 'No'
 			END AS IsCopyOnly
-		--, s.is_password_Protected
 		, CASE bh.IsSnapshot
 			WHEN 1 THEN 'Yes'
 			ELSE 'No'
@@ -736,12 +710,7 @@ IF @Mode IN (2,4) BEGIN
 		AND bh.BackupType = COALESCE(@BackupType, bh.BackupType)
 		AND bh.BackupStartDate >= COALESCE(@StartDate, bh.BackupStartDate)
 		AND bh.BackupStartDate <= COALESCE(@EndDate, bh.BackupStartDate)
-/*
-		AND bh.IsCopyOnly = CASE
-			WHEN @ShowCopyOnly = 1 THEN bh.IsCopyOnly
-			ELSE 0
-			END
-*/		AND bh.IsCopyOnly = COALESCE(@ShowCopyOnly, bh.IsCopyOnly)
+		AND bh.IsCopyOnly = COALESCE(@ShowCopyOnly, bh.IsCopyOnly)
 	ORDER BY 
 		bh.BackupStartDate DESC;
 
@@ -780,7 +749,6 @@ SELECT
 		WHEN 'L' THEN 'Transaction Log'
 		END AS BackupType
     , bpc.NumberOfPaths
---	, bp.BackupPath
     , COALESCE(bp.BackupPath, bh.DeviceType) AS BackupPath
 	FROM #BackupHistory bh
 	INNER JOIN #BackupPath bp
@@ -846,11 +814,11 @@ IF @Mode IN (5) BEGIN
 			ELSE 'Unknown' END AS RestoreType
 		, CASE rh.[replace]
 			WHEN 1 THEN 'Yes'
-			WHEN 2 THEN 'No'
+			WHEN 0 THEN 'No'
 			ELSE 'Unknown' END AS [Replace]
 		, CASE rh.[recovery]
 			WHEN 1 THEN 'Recovery'
-			WHEN 2 THEN 'No Recovery'
+			WHEN 0 THEN 'No Recovery'
 			ELSE 'Unknown' END AS [Recovery]
 		, rh.stop_at AS StopAtTime
 	FROM master.sys.databases d
@@ -866,6 +834,26 @@ IF @Mode IN (5) BEGIN
 /* @Mode = 0 Backup issues */
 IF @Mode IN (0,99) BEGIN
 
+IF OBJECT_ID('tempdb..#Category') IS NOT NULL
+	DROP TABLE #Category;
+
+CREATE TABLE #Category (
+    CategoryID TINYINT
+	, CategoryName VARCHAR(50)
+	);
+
+INSERT #Category (CategoryID, CategoryName)
+VALUES
+    (0, '')
+	, (1, 'Discovery')
+    , (2, 'Recoverability')
+    , (3, 'Security')
+    , (4, 'Availability')
+    , (5, 'Integrity')
+    , (6, 'Reliability')
+    , (7, 'Performance')
+    , (8, 'Troubleshooting');
+
 	IF OBJECT_ID('tempdb..#Results') IS NOT NULL
 		DROP TABLE #Results;
 
@@ -880,6 +868,19 @@ IF @Mode IN (0,99) BEGIN
 		, ActionStep NVARCHAR(MAX)
 		, ReadMoreURL XML
 		);
+
+	INSERT #Results
+	SELECT
+		0
+		, 0
+		, 0
+		, 'sp_CheckBackup'
+		, 'Provided by Straight Path IT Solutions, LLC'
+		, NULL
+		, '(Information captured on ' + CONVERT(VARCHAR(100), GETDATE(), 101) + ' using version ' + @Version + ')'
+		, 'Use this FREE tool to check your backups for recovery issues!'
+		, 'https://straightpathsql.com/tool/sp_checkbackup/'
+
 
 	/* Backup Compression not enabled */
 	INSERT #Results
@@ -1039,7 +1040,7 @@ IF @Mode IN (0,99) BEGIN
 		, 'No recent log backup'
 		, 'No log backup in the last day'
 		, d.[name]
-		, 'The database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups in the last hour.'
+		, 'The database ' + d.[name] + ' is in Full or Bulk Logged recovery model but has not had any transaction log backups in the last 24 hours.'
 		, 'If point in time recovery is important to you, you need to take regular log backups.'
 		, 'https://straightpathsql.com/check/recovery-point-objective'
 	FROM master.sys.databases d
@@ -1096,7 +1097,7 @@ IF @Mode IN (0,99) BEGIN
 		, 'We recommend having your backups in a single location, because split backup chains can create a headache when you need to restore.'
 		, 'https://straightpathsql.com/check/split-backup-chain'
 	FROM BackupPathCount bpc
-	WHERE bpc.NumberOfPaths > 1
+	WHERE bpc.NumberOfPaths > 1;
 
 
 	/* check for TDE certificate backup */
@@ -1110,7 +1111,7 @@ IF @Mode IN (0,99) BEGIN
 		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' has never been backed up'
 		, 'Make a backup of your current certificate and store it in a secure location in case you need to restore this encrypted database.'
-		, 'https://straightpathsql.com/check/tde-certificate-no-backup'
+		, 'https://straightpathsql.com/check/no-recent-tde-certificate-backup/'
 	FROM sys.certificates c 
 	INNER JOIN sys.dm_database_encryption_keys d 
 		ON c.thumbprint = d.encryptor_thumbprint
@@ -1126,7 +1127,7 @@ IF @Mode IN (0,99) BEGIN
 		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' has not been backed up since: ' + CAST(c.pvt_key_last_backup_date AS VARCHAR(100))
 		, 'Make sure you have a recent backup of your certificate in a secure location in case you need to restore your encrypted database.'
-		, 'https://straightpathsql.com/check/tde-certificate-no-backup'
+		, 'https://straightpathsql.com/check/no-recent-tde-certificate-backup/'
 	FROM sys.certificates c 
 	INNER JOIN sys.dm_database_encryption_keys d 
 		ON c.thumbprint = d.encryptor_thumbprint
@@ -1144,7 +1145,7 @@ IF @Mode IN (0,99) BEGIN
 		, db_name(d.database_id)
 		, 'The certificate ' + c.name + ' used to encrypt database ' + db_name(d.database_id) + ' is set to expire on: ' + CAST(c.expiry_date AS VARCHAR(100))
 		, 'Although you will still be able to backup or restore your encrypted database with an expired certificate, these should be changed regularly like passwords.'
-		, 'https://straightpathsql.com/check/tde-certificate-expiring'
+		, 'https://straightpathsql.com/check/tde-certificate-expiration-date/'
 	FROM sys.certificates c 
 	INNER JOIN sys.dm_database_encryption_keys d 
 		ON c.thumbprint = d.encryptor_thumbprint;
@@ -1163,7 +1164,7 @@ IF @Mode IN (0,99) BEGIN
 			, b.[database_name]
 			, ''The certificate '' + c.name + '' used to encrypt database backups for '' + b.[database_name] + '' has never been backed up.''
 			, ''Make sure you have a recent backup of your certificate in a secure location in case you need to restore encrypted database backups.''
-			, ''https://straightpathsql.com/check/database-backup-certificate-no-backup''
+			, ''https://straightpathsql.com/check/missing-database-backup-certificate-backup/''
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
 			ON c.thumbprint = b.encryptor_thumbprint
@@ -1184,7 +1185,7 @@ IF @Mode IN (0,99) BEGIN
 			, b.[database_name]
 			, ''The certificate '' + c.name + '' used to encrypt database backups for '' + b.[database_name] + '' has not been backed up since: '' + CAST(c.pvt_key_last_backup_date AS VARCHAR(100))
 			, ''Make sure you have a recent backup of your certificate in a secure location in case you need to restore encrypted database backups.''
-			, ''https://straightpathsql.com/check/database-backup-certificate-no-backup''
+			, ''https://straightpathsql.com/check/missing-database-backup-certificate-backup/''
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
 			ON c.thumbprint = b.encryptor_thumbprint
@@ -1206,7 +1207,7 @@ IF @Mode IN (0,99) BEGIN
 			, b.[database_name]
 			, ''The certificate '' + c.name + '' used to encrypt database '' + b.[database_name] + '' is set to expire on: '' + CAST(c.expiry_date AS VARCHAR(100))
 			, ''You will not be able to backup or restore your encrypted database backups with an expired certificate, so these should be changed regularly like passwords.''
-			, ''https://straightpathsql.com/check/database-backup-expire''
+			, ''https://straightpathsql.com/check/database-backup-certificate-expiration-date/''
 		FROM sys.certificates c 
 		INNER JOIN msdb.dbo.backupset b
 			ON c.thumbprint = b.encryptor_thumbprint
@@ -1232,25 +1233,39 @@ IF @Mode IN (0,99) BEGIN
 	INSERT #FailedBackups
 	EXEC sp_executesql @SQL
 
-	;WITH FailedBackups AS (
-	SELECT DISTINCT
-		fb.LogDate
-		, LEFT(fb.LogText, CHARINDEX('.', fb.LogText)) AS Issue
-		, SUBSTRING (fb.LogText, 55, CHARINDEX('.', fb.LogText)-55) AS DatabaseName
-	FROM #FailedBackups fb
-	WHERE fb.LogText LIKE '%BACKUP DATABASE%'
-	AND fb.LogDate >= @StartDate
-	    AND fb.LogDate <= @EndDate
-	UNION
-	SELECT DISTINCT
-		fb.LogDate
-		, LEFT(fb.LogText, CHARINDEX('.', fb.LogText)) AS Issue
-		, SUBSTRING (fb.LogText, 50, CHARINDEX('.', fb.LogText)-50) AS DatabaseName
-	FROM #FailedBackups fb
-	WHERE fb.LogText LIKE '%BACKUP LOG%'
-	AND fb.LogDate >= @StartDate
-	    AND fb.LogDate <= @EndDate
-    )
+;WITH FailedBackupRaw AS (
+		SELECT
+			fb.LogDate
+			, fb.LogText
+			, CASE
+				WHEN fb.LogText LIKE '%BACKUP DATABASE %'
+					THEN CHARINDEX('BACKUP DATABASE ', fb.LogText) + 16   /* length of 'BACKUP DATABASE ' */
+				WHEN fb.LogText LIKE '%BACKUP LOG %'
+					THEN CHARINDEX('BACKUP LOG ', fb.LogText) + 11        /* length of 'BACKUP LOG ' */
+				END AS NameStart
+		FROM #FailedBackups fb
+		WHERE fb.LogDate >= @StartDate
+			AND fb.LogDate <= @EndDate
+			AND (fb.LogText LIKE '%BACKUP DATABASE %' OR fb.LogText LIKE '%BACKUP LOG %')
+	),
+	FailedBackupParsed AS (
+		SELECT
+			LogDate
+			, LogText
+			, NameStart
+			, NULLIF(CHARINDEX('.', LogText, NameStart), 0) AS NameEnd   /* first period after the name begins */
+		FROM FailedBackupRaw
+		WHERE NameStart IS NOT NULL
+	),
+	FailedBackup AS (
+		SELECT DISTINCT
+			LogDate
+			, LEFT(LogText, NameEnd) AS Issue
+			, REPLACE(REPLACE(LTRIM(RTRIM(SUBSTRING(LogText, NameStart, NameEnd - NameStart))), '[', ''), ']', '') AS DatabaseName
+		FROM FailedBackupParsed
+		WHERE NameEnd IS NOT NULL
+			AND NameEnd > NameStart   /* guarantees a positive SUBSTRING length */
+	)
 
 	INSERT #Results
 	SELECT
@@ -1263,8 +1278,8 @@ IF @Mode IN (0,99) BEGIN
 		, fb.Issue
 		, 'Review the SQL Server Log to find out more about any failed backups.'
 		, 'https://straightpathsql.com/check/failed-backup'
-	FROM FailedBackups fb
-	WHERE DatabaseName = COALESCE(@DatabaseName, DatabaseName)
+	FROM FailedBackup fb
+	WHERE fb.DatabaseName = COALESCE(@DatabaseName, fb.DatabaseName);
 
 	/* find databases not meeting Recovery Point Objective (RPO) */
 	IF @RPO IS NOT NULL BEGIN
@@ -1332,21 +1347,43 @@ IF @Mode IN (0,99) BEGIN
 
 	/* check for high VLF count */
 	IF @SQLVersionMajor >= 13 BEGIN
+
+		/* Build the safe list first so dm_db_log_stats is never called against
+		   an inaccessible database (offline, restoring, recovery pending, a
+		   snapshot, or a non-readable AG secondary), which would error and
+		   abort the INSERT. */
+		IF OBJECT_ID('tempdb..#VLFDatabases') IS NOT NULL
+			DROP TABLE #VLFDatabases;
+
+		CREATE TABLE #VLFDatabases (
+			DatabaseID INT
+			, DatabaseName NVARCHAR(128)
+			);
+
+		INSERT #VLFDatabases (DatabaseID, DatabaseName)
+		SELECT d.database_id, d.[name]
+		FROM sys.databases d
+		WHERE d.state = 0                                                    /* ONLINE only */
+			AND d.source_database_id IS NULL                                 /* exclude snapshots */
+			AND d.is_in_standby = 0                                          /* exclude log shipping standby */
+			AND DATABASEPROPERTYEX(d.[name], 'Updateability') = 'READ_WRITE' /* skip read-only and non-readable secondaries */
+			AND d.[name] = COALESCE(@DatabaseName, d.[name]);
+
 		INSERT #Results
 		SELECT
 			2
 			, 217
 			, 2
 			, 'High VLF count'
-			, 'The database ' + d.[name] + ' has ' + CONVERT(VARCHAR(10), ls.total_vlf_count) + ' virtual log files.'
-			, d.[name]
+			, 'The database ' + vd.DatabaseName + ' has ' + CONVERT(VARCHAR(10), ls.total_vlf_count) + ' virtual log files.'
+			, vd.DatabaseName
 			, 'A high number of VLFs can cause performance issues, especially for backup/restore operations and failovers.'
 			, 'Consider resizing the log file to reduce the number of VLFs, and then grow it back out to an appropriate size with less VLFs.'
-			, ''
-		FROM sys.databases d
-		CROSS APPLY sys.dm_db_log_stats(d.database_id) ls
+			, 'https://straightpathsql.com/check/virtual-log-files/'
+		FROM #VLFDatabases vd
+		CROSS APPLY sys.dm_db_log_stats(vd.DatabaseID) ls
 		WHERE ls.total_vlf_count > 200;
-		
+
 		END;
 
 	/* Log backups to NUL */
@@ -1444,28 +1481,111 @@ WHERE DatabaseName <> 'tempdb'
 	AND CONVERT(DATETIME, CHECKDB.[Value], 121) < DATEADD(DD, -14, CURRENT_TIMESTAMP)
 	AND DatabaseName = COALESCE(@DatabaseName, DatabaseName);
 
-
+/* stopped SQL Agent */
+INSERT #Results
 SELECT
-	CASE CategoryID
-        WHEN 2 THEN 'Recoverability'
-		WHEN 5 THEN 'Integrity'
-	END AS Category
-    , CASE [Importance]
-        WHEN 1 THEN 'High'
-		WHEN 2 THEN 'Medium'
-		ELSE 'Low'
-	END AS [Importance]
-    , CheckName
-    , Issue
+	6
+	, 628
+	, 1
+	, 'SQL Server Agent offline'
+	, 'The [' + servicename + '] service is currently offline.' 
+	, NULL
+	, 'This service is often responsible for running scheduled jobs, including backups and maintenance tasks. If it is offline, these tasks will not run.'
+	, 'Review the service status in Configuration Manager and start it if desired. The current startup type is [' + startup_type_desc + '].'
+	, 'https://straightpathsql.com/check/sql-agent-offline'
+FROM master.sys.dm_server_services
+WHERE servicename LIKE 'SQL Server Agent%'
+AND status_desc <> 'Running'
+AND CAST(SERVERPROPERTY('Edition') AS VARCHAR(1000)) NOT LIKE '%xpress%'; /* exclude Express Edition, which doesn't have SQL Agent */
+
+/* Check for I/O freezes */
+IF OBJECT_ID('tempdb..#ErrorLog') IS NOT NULL DROP TABLE #ErrorLog;
+CREATE TABLE #ErrorLog (
+    LogDate DATETIME2(3),
+    ProcessInfo NVARCHAR(4000),
+    LogMessage NVARCHAR(4000)
+);
+
+/* read current SQL Server error log (0 = current, 1 = error log type) */
+INSERT INTO #ErrorLog
+EXEC sys.xp_readerrorlog 0, 1;
+
+WITH Events AS (
+    SELECT
+        LogDate,
+        LogMessage,
+        /* normalize message and extract database name */
+        CASE
+            WHEN LogMessage LIKE 'I/O is frozen on database %' THEN
+                LTRIM(RTRIM(SUBSTRING(LogMessage, CHARINDEX('I/O is frozen on database', LogMessage) + 26,
+                    CHARINDEX('.', LogMessage, CHARINDEX('I/O is frozen on database', LogMessage)) 
+                    - (CHARINDEX('I/O is frozen on database', LogMessage) + 26))))
+            WHEN LogMessage LIKE 'I/O was resumed on database %' THEN
+                LTRIM(RTRIM(SUBSTRING(LogMessage, CHARINDEX('I/O was resumed on database', LogMessage) + 28,
+                    CHARINDEX('.', LogMessage, CHARINDEX('I/O was resumed on database', LogMessage)) 
+                    - (CHARINDEX('I/O was resumed on database', LogMessage) + 28))))
+            ELSE NULL
+        END AS DatabaseName,
+        CASE
+            WHEN LogMessage LIKE 'I/O is frozen on database %' THEN 'Frozen'
+            WHEN LogMessage LIKE 'I/O was resumed on database %' THEN 'Resumed'
+            ELSE NULL
+        END AS EventType
+    FROM #ErrorLog
+    WHERE LogMessage LIKE 'I/O is frozen on database %' OR LogMessage LIKE 'I/O was resumed on database %'
+),
+Paired AS (
+    /* for each Frozen event find the next Resumed event for the same database */
+    SELECT
+        f.DatabaseName,
+        f.LogDate AS FrozenAt,
+        r.LogDate AS ResumedAt,
+        DATEDIFF(MILLISECOND, f.LogDate, r.LogDate) AS DurationMs
+    FROM Events f
+    OUTER APPLY (
+        SELECT TOP (1) r.LogDate
+        FROM Events r
+        WHERE r.EventType = 'Resumed'
+          AND r.DatabaseName = f.DatabaseName
+          AND r.LogDate > f.LogDate
+        ORDER BY r.LogDate ASC
+    ) r
+    WHERE f.EventType = 'Frozen'
+      AND r.LogDate IS NOT NULL
+)
+INSERT #Results
+SELECT
+    7
+    , 739
+    , 2
+    , 'I/O freeze detected'
+    , 'There have been at least ' + CAST(COUNT(1) AS VARCHAR(4)) + ' I/O freeze(s) against the [' + DatabaseName + '] database with an average duration of '+ CAST(AVG(CAST(DurationMs AS FLOAT)) AS VARCHAR(10)) + ' milliseconds.'
     , DatabaseName
-    , Details
-    , ActionStep
-    , ReadMoreURL
-FROM #Results
-ORDER BY
-    [Importance]
-	, Category
-	, CheckName;
+    , 'I/O freezes can negatively impact your database performance. These are usually caused by VM backups or other backups that use Volume Shadowcopy Services (VSS).'
+    , 'Ensure you understand how VSS backups are used in your environment.'
+    , ''
+FROM Paired
+GROUP BY DatabaseName
+
+	SELECT
+		r.Importance
+		, r.CheckName
+		, r.Issue
+		, r.DatabaseName
+		, r.Details
+		, r.ActionStep    
+		, r.ReadMoreURL
+		, r.CheckID
+	FROM #Results r
+	INNER JOIN #Category c
+		ON r.CategoryID = c.CategoryID
+	WHERE r.CategoryID <> 1
+	ORDER BY
+		r.Importance
+		, c.CategoryID
+		, r.CheckID
+		, r.Issue
+		, r.DatabaseName;
 
 END
 GO
